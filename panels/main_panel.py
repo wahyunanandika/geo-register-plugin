@@ -79,6 +79,26 @@ class MainPanel(lf.ui.Panel):
         scale = layout.get_dpi_scale()
         theme = lf.ui.theme()
 
+        # If no cameras are present the user has switched to Edit Mode and the
+        # dataset (including camera data) has been discarded.  Geo-registration
+        # requires camera information, so show a blocking notice and return.
+        scene = lf.get_scene()
+        if scene is not None:
+            import lichtfeld.scene as lf_scene
+            has_cameras = any(True for _ in scene.get_nodes(type=lf_scene.NodeType.CAMERA))
+            if not has_cameras:
+                layout.label("Geo Reference — Unavailable")
+                layout.separator()
+                layout.text_colored(
+                    "Geo-registration requires camera data, which is\n"
+                    "unavailable in Edit Mode.\n\n"
+                    "Camera information is essential for the registration\n"
+                    "process. Please complete geo-registration before\n"
+                    "switching to Edit Mode.",
+                    (1.0, 0.75, 0.2, 1.0),
+                )
+                return
+
         layout.label("Detect / Add Geo Reference")
         layout.separator()
 
