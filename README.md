@@ -243,7 +243,7 @@ identical to LAS; only the storage is compressed using the
 - Requires the `lazrs` or `laszip` Python package in the plugin environment
   (installed automatically with the plugin dependencies).
 
-### 3D Tiles — ArcGIS Gaussian Splat Layer
+### 3D Tiles 
 
 The plugin can export the splat model as a georeferenced **3D Tiles 1.1** dataset
 that renders as full Gaussian splats (not a point cloud).
@@ -294,6 +294,30 @@ the Niantic reference byte-for-byte.
 
 ---
 
-## Requirements
+## No Scene Plugin Functionality
 
-- At least **3 matched image–camera pairs** are required to solve the transform.
+When LichtFeld Studio is in **Edit Mode** (no scene loaded), geo-registration is not
+possible because there are no camera poses to fit the similarity transform against.
+
+However, the plugin remains useful: if you already have a **pre-calculated similarity
+matrix** (computed during a previous session while a scene was loaded), you can still
+convert any 3DGS PLY file to a geo-referenced export format without reloading the scene.
+
+> **Important:** the similarity matrix must have been calculated with a scene still
+> loaded in LichtFeld Studio. You cannot compute it in Edit Mode.
+
+**Steps:**
+
+1. Switch to **Edit Mode** in LichtFeld Studio (or open it without a scene).
+2. The Geo Register Plugin panel automatically switches to **PLY → Geo Export** mode.
+3. Click **Pick PLY File** and select your 3DGS `.ply` file.
+4. Click **Pick Similarity JSON** and select the pre-calculated `similarity_transform.json`.
+5. Once both files are selected, choose the output **Format** and export destination.
+6. Click **Export** — the plugin converts the PLY directly to the chosen format
+   (LAS, LAZ, or 3D Tiles) using the stored similarity transform.
+
+The similarity JSON format is the same as described in the [Similarity File](#2-similarity-file)
+source mode section above. The plugin exports this file automatically to
+`<output_dir>/geo_register_plugin_data/similarity_transform.json` after every successful solve.
+
+---
