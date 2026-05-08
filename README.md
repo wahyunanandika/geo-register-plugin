@@ -243,7 +243,9 @@ identical to LAS; only the storage is compressed using the
 - Requires the `lazrs` or `laszip` Python package in the plugin environment
   (installed automatically with the plugin dependencies).
 
-### 3D Tiles 
+### 3D Tiles
+
+![3D Tiles export in ArcGIS](assets/3dtiles_example.png)
 
 The plugin can export the splat model as a georeferenced **3D Tiles 1.1** dataset
 that renders as full Gaussian splats (not a point cloud).
