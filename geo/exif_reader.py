@@ -91,7 +91,18 @@ def _extract_gps(path: Path, Image, TAGS, GPSTAGS) -> dict | None:
         if lat is None or lon is None:
             return None
 
-        alt = _rational_to_float(gps_info.get("GPSAltitude")) or 0.0
+        alt_raw = _rational_to_float(gps_info.get("GPSAltitude")) or 0.0
+        # GPSAltitudeRef: 0 = above sea level, 1 = below sea level
+        # Pillow may return this as int, bytes (b'\x01'), or str ('1').
+        alt_ref = gps_info.get("GPSAltitudeRef", 0)
+        if isinstance(alt_ref, (bytes, bytearray)):
+            alt_ref = alt_ref[0] if alt_ref else 0
+        alt_msl = -alt_raw if (int(alt_ref) == 1) else alt_raw
+
+        # EXIF altitude is always MSL; convert to WGS-84 ellipsoidal via EGM96.
+        from .geoid import msl_to_ellipsoidal
+        alt = msl_to_ellipsoidal(lat, lon, alt_msl)
+
         return {"lat": lat, "lon": lon, "alt": alt}
 
     except Exception:
