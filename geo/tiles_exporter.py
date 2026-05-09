@@ -188,10 +188,13 @@ def _build_tileset(sim: dict, positions: np.ndarray, content_uri: str) -> dict:
     R = np.array(sim["rotation"], dtype=np.float64).reshape(3, 3)
     t = np.array(sim["translation"], dtype=np.float64)
 
+    # Build 4x4 local→ECEF matrix with GL flip (diag(1,-1,-1)) baked in.
+    # The boundingVolume is expressed in this tile's local space; the renderer
+    # applies the transform to it automatically — no ECEF projection needed.
     M = np.eye(4, dtype=np.float64)
     M[:3, :3] = s * R
     M[:3, 3] = t
-    M = M @ np.diag([1.0, -1.0, -1.0, 1.0])   # bake GL flip into tile transform
+    M = M @ np.diag([1.0, -1.0, -1.0, 1.0])
 
     transform_col_major = M.T.flatten().tolist()
 
@@ -206,24 +209,6 @@ def _build_tileset(sim: dict, positions: np.ndarray, content_uri: str) -> dict:
         0.0, 0.0, float(half[2]),
     ]
     geom_err = float(np.linalg.norm(pmax - pmin))
-
-    corners = np.array([
-        [pmin[0], pmin[1], pmin[2]], [pmax[0], pmin[1], pmin[2]],
-        [pmin[0], pmax[1], pmin[2]], [pmax[0], pmax[1], pmin[2]],
-        [pmin[0], pmin[1], pmax[2]], [pmax[0], pmin[1], pmax[2]],
-        [pmin[0], pmax[1], pmax[2]], [pmax[0], pmax[1], pmax[2]],
-    ], dtype=np.float64)
-    ecef = (corners @ M[:3, :3].T) + M[:3, 3]
-    ecef_min = ecef.min(axis=0)
-    ecef_max = ecef.max(axis=0)
-    ecef_center = (ecef_min + ecef_max) * 0.5
-    ecef_half   = (ecef_max - ecef_min) * 0.5
-    ecef_box = [
-        float(ecef_center[0]), float(ecef_center[1]), float(ecef_center[2]),
-        float(ecef_half[0]), 0.0, 0.0,
-        0.0, float(ecef_half[1]), 0.0,
-        0.0, 0.0, float(ecef_half[2]),
-    ]
 
     return {
         "asset": {"version": "1.1"},
@@ -243,16 +228,11 @@ def _build_tileset(sim: dict, positions: np.ndarray, content_uri: str) -> dict:
         },
         "geometricError": geom_err,
         "root": {
-            "boundingVolume": {"box": ecef_box},
+            "transform": transform_col_major,
+            "boundingVolume": {"box": box},
             "geometricError": geom_err,
             "refine": "REPLACE",
-            "children": [{
-                "transform": transform_col_major,
-                "boundingVolume": {"box": box},
-                "geometricError": geom_err,
-                "refine": "REPLACE",
-                "content": {"uri": content_uri},
-            }],
+            "content": {"uri": content_uri},
         },
     }
 
