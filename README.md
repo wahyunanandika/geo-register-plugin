@@ -56,7 +56,7 @@ to its camera pose by filename stem, and runs the solver.
 > images and the dataset cameras — for example, `DJI_0001.jpg` (original) matches
 > `DJI_0001.JPG` or `DJI_0001.png` in the dataset.
 
-> **Note:** EXIF GPS accuracy may not be accurate, especially in the altitude direction. For more accurate results, use professional alignment tools with GCPs (ground control points).
+> **Note:** EXIF GPS readings can be imprecise, especially in the altitude direction. For more accurate results, use professional alignment tools with GCPs (ground control points).
 
 ---
 
