@@ -118,10 +118,10 @@ drone flight controller, or sourced from a ground control point log).
 
 **Required CSV format:**
 
-The file must have a header row with exactly these column names:
+The file must have a header row with these column names (in any order):
 
 ```
-#image_name,lat,lon,alt
+image_name,lat,lon,alt
 DJI_0001.JPG,32.08154321,34.78912345,48.250
 DJI_0002.JPG,32.08163897,34.78924561,48.431
 DJI_0003.JPG,32.08172450,34.78937812,48.619
@@ -357,5 +357,3 @@ convert any 3DGS PLY file to a geo-referenced export format without reloading th
 The similarity JSON format is the same as described in the [Similarity File](#2-similarity-file)
 source mode section above. The plugin exports this file automatically to
 `<output_dir>/geo_register_plugin_data/similarity_transform.json` after every successful solve.
-
----

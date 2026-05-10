@@ -427,12 +427,24 @@ class MainPanel(lf.ui.Panel):
                 lines[0] = lines[0].lstrip("#").strip()
             import io
             reader = csv.DictReader(io.StringIO("\n".join(lines)))
+            fieldnames = reader.fieldnames
+            required = {"image_name", "lat", "lon", "alt"}
+            if set(fieldnames) != required:
+                raise ValueError(f"Invalid CSV header. Expected columns: {required}, got {set(fieldnames)}")
+            
+            # Find column indices for any order
+            lat_idx = fieldnames.index("lat")
+            lon_idx = fieldnames.index("lon")
+            alt_idx = fieldnames.index("alt")
+            image_idx = fieldnames.index("image_name")
+            
             for row in reader:
+                values = list(row.values())
                 gps_list.append({
-                    "name": Path(row["image_name"]).stem,
-                    "lat":  float(row["lat"]),
-                    "lon":  float(row["lon"]),
-                    "alt":  float(row["alt"]),
+                    "name": Path(values[image_idx]).stem,
+                    "lat": float(values[lat_idx]),
+                    "lon": float(values[lon_idx]),
+                    "alt": float(values[alt_idx]),
                 })
         except Exception as exc:
             self._set_status(f"Failed to parse CSV: {exc}", error=True)
@@ -807,10 +819,6 @@ class MainPanel(lf.ui.Panel):
         finally:
             self._tiles_progress = None
             lf.ui.request_redraw()
-
-    def _on_tiles_progress(self, fraction: float) -> None:
-        self._tiles_progress = fraction
-        lf.ui.request_redraw()
 
     # ── PLY Converter (Edit Mode) ─────────────────────────────────────────────
 
