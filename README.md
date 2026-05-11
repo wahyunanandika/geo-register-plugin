@@ -192,6 +192,49 @@ All other columns (yaw, pitch, roll, lens parameters) are ignored by the plugin.
 
 ---
 
+### 5. Metashape Cameras XML
+
+Loads camera GPS positions from an Agisoft Metashape camera XML export and runs
+the same solver as the CSV modes.
+
+**How to export from Metashape:**
+
+1. In Metashape, make sure the chunk's **coordinate system** is set to **WGS 84 (EPSG:4326)**.
+2. Go to **File → Export → Export Cameras…** and save as XML.
+
+**Steps in the plugin:**
+
+1. Select **Metashape Cameras XML** from the Source dropdown.
+2. Click **Load Metashape Cameras XML** and pick the exported `.xml` file.
+
+**Requirements:**
+
+- The chunk CRS must be **GEOGCS / EPSG:4326**. Chunks with any other CRS
+  (projected, geocentric, or local) are skipped with a warning.
+- Cameras with `enabled="0"` on their `<reference>` tag are skipped.
+- Multiple chunks in the same file are all processed and merged.
+
+> **Note — naive parsing:**
+> The parser reads GPS coordinates directly from the `<reference>` attribute of each
+> `<camera>` element. It assumes that this tag is present and populated with GPS data —
+> which is the case when cameras were imported with GPS coordinates in Metashape's
+> Reference pane. If a camera was added without GPS data, its `<reference>` tag will
+> be absent and that camera will simply be skipped.
+>
+> Before loading, you can verify your file contains reference data by checking that
+> individual `<camera>` entries include a `<reference>` tag with `x`, `y`, `z`
+> attributes, for example:
+> ```xml
+> <camera id="3" sensor_id="0" label="DJI_0003.JPG" enabled="1">
+>   <transform>...</transform>
+>   <reference x="8.71105718333333" y="50.1547084833333" z="195.665"
+>              yaw="..." pitch="0" roll="0" enabled="1"/>
+> </camera>
+> ```
+> Here `x` = longitude, `y` = latitude, `z` = altitude in metres (WGS-84).
+
+---
+
 ## Output Files
 
 After a successful solve the plugin writes to `<output_dir>/geo_register_plugin_data/`:

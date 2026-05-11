@@ -27,8 +27,8 @@ class MainPanel(lf.ui.Panel):
     space = lf.ui.PanelSpace.MAIN_PANEL_TAB
     order = 50
 
-    _MODES     = ["EXIF", "Similarity File", "Image Positions CSV", "RealityScan Parameters CSV"]
-    _MODE_KEYS = ["exif", "similarity", "csv", "rs_csv"]
+    _MODES     = ["EXIF", "Similarity File", "Image Positions CSV", "RealityScan Parameters CSV", "Metashape Cameras XML"]
+    _MODE_KEYS = ["exif", "similarity", "csv", "rs_csv", "metashape_xml"]
 
     def __init__(self):
         self._mode_idx: int                  = 0
@@ -131,8 +131,10 @@ class MainPanel(lf.ui.Panel):
             self._draw_similarity_section(layout, scale, theme)
         elif self._mode == "csv":
             self._draw_csv_section(layout, scale, theme)
-        else:
+        elif self._mode == "rs_csv":
             self._draw_rs_csv_section(layout, scale, theme)
+        else:
+            self._draw_metashape_xml_section(layout, scale, theme)
 
         # Status line
         if self._status:
@@ -498,6 +500,50 @@ class MainPanel(lf.ui.Panel):
             return
 
         lf.log.info(f"geo_register: loaded {len(gps_list)} RealityScan positions from '{path}'")
+        self._run_georeg(gps_list)
+
+    def _draw_metashape_xml_section(self, layout, scale, theme):
+        layout.text_colored(
+            "Load a Metashape camera XML export.\n"
+            "Chunk CRS must be GEOGCS/EPSG:4326.\n"
+            "Camera GPS positions are read from\n"
+            "the reference tag of each camera.",
+            theme.palette.text_dim,
+        )
+        layout.spacing()
+        if layout.button_styled("Load Metashape Cameras XML", "primary", (-1, 32 * scale)):
+            self._load_metashape_xml_file()
+
+    def _load_metashape_xml_file(self) -> None:
+        from ..geo.metashape_parser import parse_metashape_xml, MetashapeXMLError
+
+        path = lf.ui.open_xml_file_dialog()
+        if not path:
+            return
+
+        self._transform = None
+        self._lla = None
+        self._clear_point()
+
+        try:
+            gps_list = parse_metashape_xml(path)
+        except MetashapeXMLError as exc:
+            self._set_status(str(exc), error=True)
+            lf.log.error(f"geo_register: {exc}")
+            return
+        except Exception as exc:
+            self._set_status(f"Failed to parse Metashape XML: {exc}", error=True)
+            lf.log.error(f"geo_register: {exc}")
+            return
+
+        if not gps_list:
+            self._set_status(
+                "No cameras with GPS reference found in Metashape XML.", error=True
+            )
+            lf.log.warn("geo_register: Metashape XML contained no cameras with <reference> data.")
+            return
+
+        lf.log.info(f"geo_register: loaded {len(gps_list)} camera positions from Metashape XML '{path}'")
         self._run_georeg(gps_list)
 
     def _load_similarity_file(self) -> None:
