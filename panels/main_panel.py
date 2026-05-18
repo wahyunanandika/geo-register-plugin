@@ -50,6 +50,7 @@ class MainPanel(lf.ui.Panel):
         self._tiles_error: str | None        = None
         self._tiles_success: str | None      = None
         self._tiles_max_sh: int              = 3
+        self._tiles_sh_info: tuple | None    = None   # (detected, user_bound, output)
         # PLY converter (Edit Mode)
         self._ply_file_path: str | None      = None
         self._ply_sim_path: str | None       = None
@@ -60,6 +61,7 @@ class MainPanel(lf.ui.Panel):
         self._ply_error: str | None          = None
         self._ply_success: str | None        = None
         self._ply_max_sh: int                = 3
+        self._ply_sh_info: tuple | None      = None   # (detected, user_bound, output)
 
     @property
     def _mode(self) -> str:
@@ -734,6 +736,14 @@ class MainPanel(lf.ui.Panel):
 
         layout.spacing()
 
+        if self._tiles_sh_info is not None:
+            detected, user_bound, output = self._tiles_sh_info
+            dim = theme.palette.text_dim
+            layout.text_colored(f"Detected SH Degree:  {detected}", dim)
+            layout.text_colored(f"User Bound Degree:   {user_bound}", dim)
+            layout.text_colored(f"Output SH Degree:    {output}", dim)
+            layout.spacing()
+
         if self._tiles_progress is not None:
             pct = int(self._tiles_progress * 100)
             layout.progress_bar(self._tiles_progress, overlay=f"Exporting... {pct}%",
@@ -851,6 +861,7 @@ class MainPanel(lf.ui.Panel):
         self._tiles_progress = 0.0
         self._tiles_error    = None
         self._tiles_success  = None
+        self._tiles_sh_info  = None
         lf.ui.request_redraw()
 
         threading.Thread(
@@ -872,8 +883,10 @@ class MainPanel(lf.ui.Panel):
                 k = int(sh_raw.shape[1]) if sh_raw.ndim == 3 else 0
                 actual_sh = max(d for d in range(4) if DIM_FOR_DEGREE[d] <= k)
             except Exception:
-                actual_sh = 0
+                actual_sh = 3
             effective_sh = min(max_sh, actual_sh)
+            self._tiles_sh_info = (actual_sh, max_sh, effective_sh)
+            lf.ui.request_redraw()
             export_3dtiles(
                 node, transform, out_dir,
                 sh_degree=effective_sh,
@@ -975,6 +988,14 @@ class MainPanel(lf.ui.Panel):
 
         ready = self._ply_format_idx in (0, 1) or self._ply_out_dir is not None
 
+        if self._ply_format_idx == 2 and self._ply_sh_info is not None:
+            detected, user_bound, output = self._ply_sh_info
+            dim = theme.palette.text_dim
+            layout.text_colored(f"Detected SH Degree:  {detected}", dim)
+            layout.text_colored(f"User Bound Degree:   {user_bound}", dim)
+            layout.text_colored(f"Output SH Degree:    {output}", dim)
+            layout.spacing()
+
         if self._ply_progress is not None:
             pct = int(self._ply_progress * 100)
             layout.progress_bar(self._ply_progress, overlay=f"Exporting... {pct}%",
@@ -1068,6 +1089,7 @@ class MainPanel(lf.ui.Panel):
         self._ply_progress = 0.0
         self._ply_error    = None
         self._ply_success  = None
+        self._ply_sh_info  = None
         lf.ui.request_redraw()
 
         threading.Thread(
@@ -1096,6 +1118,8 @@ class MainPanel(lf.ui.Panel):
                 k = len(rest_names) // 3 if rest_names and len(rest_names) % 3 == 0 else 0
                 actual_sh = max(d for d in range(4) if DIM_FOR_DEGREE[d] <= k)
                 effective_sh = min(max_sh, actual_sh)
+                self._ply_sh_info = (actual_sh, max_sh, effective_sh)
+                lf.ui.request_redraw()
                 positions, rotations_wxyz, scales_log, opacity_logit, f_dc, f_rest_rgb, eff_sh = (
                     _build_from_ply(ply_data, names, sh_degree=effective_sh)
                 )
