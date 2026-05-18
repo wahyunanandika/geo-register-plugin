@@ -49,6 +49,7 @@ class MainPanel(lf.ui.Panel):
         self._tiles_progress: float | None   = None
         self._tiles_error: str | None        = None
         self._tiles_success: str | None      = None
+        self._tiles_max_sh: int              = 3
         # PLY converter (Edit Mode)
         self._ply_file_path: str | None      = None
         self._ply_sim_path: str | None       = None
@@ -58,6 +59,7 @@ class MainPanel(lf.ui.Panel):
         self._ply_progress: float | None     = None
         self._ply_error: str | None          = None
         self._ply_success: str | None        = None
+        self._ply_max_sh: int                = 3
 
     @property
     def _mode(self) -> str:
@@ -742,6 +744,14 @@ class MainPanel(lf.ui.Panel):
             if self._tiles_success:
                 layout.text_colored(self._tiles_success, (0.3, 1.0, 0.3, 1.0))
             if splat_names and self._tiles_out_dir:
+                layout.label("Max SH:")
+                layout.same_line()
+                sh_changed, sh_idx = layout.combo(
+                    "##tiles_max_sh", 3 - self._tiles_max_sh, ["3", "2", "1", "0"]
+                )
+                if sh_changed:
+                    self._tiles_max_sh = 3 - sh_idx
+                layout.spacing()
                 if layout.button_styled("Export 3D Tiles##export_tiles_btn", "primary", (-1, 32 * scale)):
                     self._start_export_tiles()
                     lf.ui.request_redraw()
@@ -845,7 +855,7 @@ class MainPanel(lf.ui.Panel):
 
         threading.Thread(
             target=self._export_tiles_worker,
-            args=(node, dict(self._transform), str(out_dir)),
+            args=(node, dict(self._transform), str(out_dir), self._tiles_max_sh),
             daemon=True,
         ).start()
 
@@ -853,12 +863,20 @@ class MainPanel(lf.ui.Panel):
         self._tiles_progress = fraction
         lf.ui.request_redraw()
 
-    def _export_tiles_worker(self, node, transform: dict, out_dir: str) -> None:
+    def _export_tiles_worker(self, node, transform: dict, out_dir: str, max_sh: int = 3) -> None:
         try:
-            from ..geo.tiles_exporter import export_3dtiles
+            from ..geo.tiles_exporter import export_3dtiles, DIM_FOR_DEGREE
+            try:
+                splat_data = node.splat_data()
+                sh_raw = splat_data.shN_raw
+                k = int(sh_raw.shape[1]) if sh_raw.ndim == 3 else 0
+                actual_sh = max(d for d in range(4) if DIM_FOR_DEGREE[d] <= k)
+            except Exception:
+                actual_sh = 0
+            effective_sh = min(max_sh, actual_sh)
             export_3dtiles(
                 node, transform, out_dir,
-                sh_degree=3,
+                sh_degree=effective_sh,
                 progress_cb=self._on_tiles_progress,
             )
             lf.log.info(f"geo_register: 3D Tiles exported to '{out_dir}'")
@@ -926,6 +944,16 @@ class MainPanel(lf.ui.Panel):
         )
         if fmt_changed:
             self._ply_format_idx = fmt_idx
+
+        if self._ply_format_idx == 2:
+            layout.spacing()
+            layout.label("Max SH:")
+            layout.same_line()
+            sh_changed, sh_idx = layout.combo(
+                "##ply_max_sh", 3 - self._ply_max_sh, ["3", "2", "1", "0"]
+            )
+            if sh_changed:
+                self._ply_max_sh = 3 - sh_idx
 
         layout.spacing()
 
@@ -1044,12 +1072,13 @@ class MainPanel(lf.ui.Panel):
 
         threading.Thread(
             target=self._ply_export_worker,
-            args=(self._ply_file_path, transform, out_path, self._ply_format_idx),
+            args=(self._ply_file_path, transform, out_path, self._ply_format_idx,
+                  self._ply_max_sh),
             daemon=True,
         ).start()
 
     def _ply_export_worker(self, ply_path: str, transform: dict,
-                           out_path: str, fmt_idx: int) -> None:
+                           out_path: str, fmt_idx: int, max_sh: int = 3) -> None:
         try:
             if fmt_idx in (0, 1):
                 from ..geo.las_exporter import export_las_from_ply
@@ -1058,12 +1087,17 @@ class MainPanel(lf.ui.Panel):
                 self._ply_success = f"Exported: {Path(out_path).name}"
                 lf.log.info(f"geo_register: PLY→LAS exported to '{out_path}'")
             else:
-                from ..geo.tiles_exporter import export_3dtiles as _tiles_exp
-                from ..geo.tiles_exporter import _read_ply, _build_from_ply, _export_from_arrays
+                from ..geo.tiles_exporter import _read_ply, _build_from_ply, _export_from_arrays, DIM_FOR_DEGREE
                 from pathlib import Path as _P
                 ply_data, names = _read_ply(_P(ply_path))
+                # f_rest_* props are flat RGB triples, so /3 gives per-channel coef count.
+                # Find the highest complete SH degree the PLY contains, then cap at user's choice.
+                rest_names = [nm for nm in names if nm.startswith("f_rest_")]
+                k = len(rest_names) // 3 if rest_names and len(rest_names) % 3 == 0 else 0
+                actual_sh = max(d for d in range(4) if DIM_FOR_DEGREE[d] <= k)
+                effective_sh = min(max_sh, actual_sh)
                 positions, rotations_wxyz, scales_log, opacity_logit, f_dc, f_rest_rgb, eff_sh = (
-                    _build_from_ply(ply_data, names, sh_degree=3)
+                    _build_from_ply(ply_data, names, sh_degree=effective_sh)
                 )
                 _export_from_arrays(
                     positions_local=positions,
