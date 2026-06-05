@@ -175,6 +175,144 @@ def _write_spz_glb(path: Path, spz_blob: bytes, num_points: int,
             f.write(b"\x00" * bin_pad)
 
 
+# ─── Octree tiling ────────────────────────────────────────────────────────────
+
+class _OctreeNode:
+    """One octree node — stores splat *indices* into the global arrays."""
+
+    def __init__(self, indices: np.ndarray, pmin: np.ndarray,
+                 pmax: np.ndarray, depth: int) -> None:
+        self.indices  = indices
+        self.pmin     = pmin
+        self.pmax     = pmax
+        self.depth    = depth
+        self.children: "list[_OctreeNode]" = []
+        self.tile_id:  "str | None"        = None
+
+    @property
+    def is_leaf(self) -> bool:
+        return len(self.children) == 0
+
+    @property
+    def center(self) -> np.ndarray:
+        return (self.pmin + self.pmax) * 0.5
+
+    @property
+    def half_axes(self) -> np.ndarray:
+        return (self.pmax - self.pmin) * 0.5
+
+    @property
+    def geometric_error(self) -> float:
+        """Bounding-box diagonal — used by Cesium's SSE formula."""
+        return float(np.linalg.norm(self.pmax - self.pmin))
+
+
+def _auto_max_splats(n_total: int) -> int:
+    """Return a sensible max-splats-per-tile for a given total splat count.
+
+    Targets roughly 64–512 leaf tiles across the full range:
+
+        <  500k  → 20 000  (~25  tiles)
+        < 2 M    → 30 000  (~66  tiles)
+        < 10 M   → 50 000  (~200 tiles)
+        < 20 M   → 75 000  (~133–266 tiles)
+        >= 20 M  → 100 000 (~200–300 tiles)
+    """
+    if n_total < 500_000:
+        return 20_000
+    if n_total < 2_000_000:
+        return 30_000
+    if n_total < 10_000_000:
+        return 50_000
+    if n_total < 20_000_000:
+        return 75_000
+    return 100_000
+
+
+def _build_octree(positions: np.ndarray, indices: np.ndarray,
+                  max_splats: int, min_size: float,
+                  depth: int = 0) -> _OctreeNode:
+    """Recursively split *indices* into an octree.
+
+    Fully vectorised: no per-splat Python loop — binning is done with a
+    single numpy comparison + bit-shift operation so it scales to 30 M+
+    splats without meaningful overhead.
+
+    Stops splitting when:
+      * ``len(indices) <= max_splats``  → leaf (small enough to stream)
+      * bbox diagonal < ``min_size``   → leaf (avoid infinite subdivision)
+    """
+    pts  = positions[indices]
+    pmin = pts.min(axis=0)
+    pmax = pts.max(axis=0)
+    node = _OctreeNode(indices, pmin, pmax, depth)
+
+    if len(indices) <= max_splats or np.linalg.norm(pmax - pmin) < min_size:
+        return node  # leaf
+
+    mid    = (pmin + pmax) * 0.5
+    bits   = (pts >= mid).astype(np.uint8)                       # (M, 3)
+    octant = bits[:, 0] | (bits[:, 1] << 1) | (bits[:, 2] << 2) # (M,) ∈ 0..7
+
+    children = []
+    for k in range(8):
+        mask = octant == k
+        if not mask.any():
+            continue
+        child = _build_octree(positions, indices[mask],
+                               max_splats, min_size, depth + 1)
+        children.append(child)
+
+    if len(children) <= 1:   # degenerate split — keep as leaf
+        return node
+
+    node.children = children
+    return node
+
+
+def _collect_leaves(node: _OctreeNode) -> "list[_OctreeNode]":
+    if node.is_leaf:
+        return [node]
+    return [leaf for child in node.children for leaf in _collect_leaves(child)]
+
+
+def _assign_tile_ids(node: _OctreeNode, counter: list) -> None:
+    if node.is_leaf:
+        node.tile_id = f"tile_{counter[0]:04d}.glb"
+        counter[0] += 1
+    else:
+        for child in node.children:
+            _assign_tile_ids(child, counter)
+
+
+def _node_to_tile_dict(node: _OctreeNode) -> dict:
+    """Recursively convert an _OctreeNode to a 3D Tiles tile dict.
+
+    ``geometricError`` is set to the bbox diagonal for internal nodes so
+    Cesium's SSE test drives refinement correctly, and to 0 for leaves
+    (no finer representation exists).  Without this, a single-tile export
+    with a large geometricError causes Cesium to wait for children that
+    never arrive — the scene appears blank.
+    """
+    c = node.center.tolist()
+    h = node.half_axes.tolist()
+    tile: dict = {
+        "boundingVolume": {"box": [
+            c[0], c[1], c[2],
+            h[0], 0.0,  0.0,
+            0.0,  h[1], 0.0,
+            0.0,  0.0,  h[2],
+        ]},
+        "geometricError": 0.0 if node.is_leaf else node.geometric_error,
+        "refine": "ADD",
+    }
+    if node.is_leaf:
+        tile["content"] = {"uri": node.tile_id}
+    else:
+        tile["children"] = [_node_to_tile_dict(c) for c in node.children]
+    return tile
+
+
 # ─── Tileset builder ──────────────────────────────────────────────────────────
 
 def _build_tileset(sim: dict, positions: np.ndarray, content_uri: str,
@@ -238,6 +376,48 @@ def _build_tileset(sim: dict, positions: np.ndarray, content_uri: str,
     }
 
 
+def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
+                         world_transform: "np.ndarray | None" = None) -> dict:
+    """Like ``_build_tileset`` but builds a recursive tree from an octree.
+
+    The similarity transform is applied identically to the original — only
+    the tile structure below the root changes.
+    """
+    s = float(sim.get("scale", sim.get("s")))
+    R = np.array(sim.get("rotation", sim.get("R")), dtype=np.float64).reshape(3, 3)
+    t = np.array(sim.get("translation", sim.get("t")), dtype=np.float64)
+
+    M = np.eye(4, dtype=np.float64)
+    M[:3, :3] = s * R
+    M[:3, 3]  = t
+    M = M @ np.diag([1.0, -1.0, -1.0, 1.0])
+    if world_transform is not None:
+        M = M @ world_transform
+
+    root_tile = _node_to_tile_dict(root_node)
+    root_tile["transform"] = M.T.flatten().tolist()
+
+    return {
+        "asset": {"version": "1.1"},
+        "extensionsUsed":     ["3DTILES_content_gltf"],
+        "extensionsRequired": ["3DTILES_content_gltf"],
+        "extensions": {
+            "3DTILES_content_gltf": {
+                "extensionsUsed": [
+                    "KHR_gaussian_splatting",
+                    "KHR_gaussian_splatting_compression_spz_2",
+                ],
+                "extensionsRequired": [
+                    "KHR_gaussian_splatting",
+                    "KHR_gaussian_splatting_compression_spz_2",
+                ],
+            }
+        },
+        "geometricError": root_node.geometric_error,
+        "root": root_tile,
+    }
+
+
 # ─── Core encoder (numpy arrays in, files out) ───────────────────────────────
 
 def _export_from_arrays(
@@ -253,6 +433,8 @@ def _export_from_arrays(
     content_name:    str,
     progress_cb,
     world_transform: np.ndarray | None = None,  # 4×4 model-local → scene-world
+    max_splats_per_tile: int = 0,   # 0 = auto (see _auto_max_splats)
+    min_tile_size: float = 0.1,     # metres; stop subdividing below this
 ) -> None:
     def prog(f):
         if progress_cb:
@@ -273,24 +455,40 @@ def _export_from_arrays(
     norms[norms == 0] = 1.0
     rotations_xyzw /= norms
 
-    prog(0.2)
+    prog(0.05)
 
-    spz = encode_spz_v3(
-        positions=positions,
-        rotations_xyzw=rotations_xyzw,
-        scales_log=scales_log.astype(np.float32),
-        opacity_logit=opacity_logit.astype(np.float32),
-        f_dc=f_dc.astype(np.float32),
-        f_rest_rgb=f_rest_rgb,
-        sh_degree=sh_degree,
-    )
-    prog(0.55)
+    # ── Build octree ──────────────────────────────────────────────────────────
+    n_total    = len(positions)
+    effective  = max_splats_per_tile if max_splats_per_tile > 0 else _auto_max_splats(n_total)
+    all_idx    = np.arange(n_total, dtype=np.int64)
+    root_node  = _build_octree(positions, all_idx, effective, min_tile_size)
+    leaves     = _collect_leaves(root_node)
+    _assign_tile_ids(root_node, [0])
+    print(f"  octree: {len(leaves)} leaf tiles "
+          f"(depth {max(l.depth for l in leaves)}, "
+          f"max {max(len(l.indices) for l in leaves):,} splats/tile, "
+          f"threshold {effective:,})")
 
-    glb_path = out_dir / content_name
-    _write_spz_glb(glb_path, spz, int(len(positions)), sh_degree, positions)
-    prog(0.8)
+    prog(0.15)
 
-    tileset = _build_tileset(transform, positions, content_name, world_transform)
+    # ── Encode + write one GLB per leaf ───────────────────────────────────────
+    for i, leaf in enumerate(leaves):
+        idx = leaf.indices
+        spz = encode_spz_v3(
+            positions=positions[idx],
+            rotations_xyzw=rotations_xyzw[idx],
+            scales_log=scales_log[idx].astype(np.float32),
+            opacity_logit=opacity_logit[idx].astype(np.float32),
+            f_dc=f_dc[idx].astype(np.float32),
+            f_rest_rgb=f_rest_rgb[idx] if f_rest_rgb is not None else None,
+            sh_degree=sh_degree,
+        )
+        _write_spz_glb(out_dir / leaf.tile_id, spz,
+                       int(len(idx)), sh_degree, positions[idx])
+        prog(0.15 + 0.75 * (i + 1) / len(leaves))
+
+    # ── Write tileset.json ────────────────────────────────────────────────────
+    tileset = _build_tileset_tiled(transform, root_node, world_transform)
     with open(out_dir / "tileset.json", "w", encoding="utf-8") as f:
         json.dump(tileset, f, indent=2)
     prog(1.0)
@@ -305,6 +503,8 @@ def export_3dtiles(
     sh_degree: int = 3,
     progress_cb=None,
     content_name: str = "splats.glb",
+    max_splats_per_tile: int = 0,   # 0 = auto; override for manual control
+    min_tile_size: float = 0.1,     # metres
 ) -> None:
     """Export a LFS SPLAT node to 3D Tiles 1.1 (SPZ-compressed glTF).
 
@@ -315,7 +515,9 @@ def export_3dtiles(
     out_dir      : str or Path — output directory (must already exist)
     sh_degree    : 0..3 SH bands to include (0 = baked color only)
     progress_cb  : optional callable(float 0..1)
-    content_name : GLB filename inside out_dir
+    content_name : kept for backward compatibility; ignored (tiles use auto names)
+    max_splats_per_tile : max splats per leaf tile; 0 = auto-tuned by splat count
+    min_tile_size       : minimum tile bbox diagonal in metres (default 0.1)
     """
     out_dir = Path(out_dir)
 
@@ -406,6 +608,8 @@ def export_3dtiles(
         content_name=content_name,
         progress_cb=lambda f: prog(0.40 + 0.60 * f),
         world_transform=W,
+        max_splats_per_tile=max_splats_per_tile,
+        min_tile_size=min_tile_size,
     )
 
 
@@ -491,6 +695,10 @@ def main():
     ap.add_argument("--fraction",       type=float, default=1.0,
                     help="keep only this fraction of splats (0,1]")
     ap.add_argument("--seed",           type=int, default=0)
+    ap.add_argument("--max-splats-per-tile", type=int, default=0,
+                    help="max splats per leaf tile (0 = auto, ~64-512 tiles)")
+    ap.add_argument("--min-tile-size",  type=float, default=0.1,
+                    help="minimum tile bbox diagonal in metres (default 0.1)")
     args = ap.parse_args()
 
     if not (0.0 < args.fraction <= 1.0):
@@ -536,8 +744,10 @@ def main():
         out_dir=args.out_dir,
         content_name=args.content_name,
         progress_cb=log_prog,
+        max_splats_per_tile=args.max_splats_per_tile,
+        min_tile_size=args.min_tile_size,
     )
-    print(f"\nwrote {args.out_dir / args.content_name} + tileset.json")
+    print(f"\nwrote {args.out_dir}/tileset.json + tile_XXXX.glb files")
 
 
 if __name__ == "__main__":
