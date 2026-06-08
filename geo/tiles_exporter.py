@@ -293,6 +293,9 @@ def _node_to_tile_dict(node: _OctreeNode) -> dict:
     (no finer representation exists).  Without this, a single-tile export
     with a large geometricError causes Cesium to wait for children that
     never arrive — the scene appears blank.
+
+    Bounding volumes here are in scene/local space. The root tile's bounding
+    volume is overridden with an ECEF bounding volume in _build_tileset_tiled.
     """
     c = node.center.tolist()
     h = node.half_axes.tolist()
@@ -304,7 +307,7 @@ def _node_to_tile_dict(node: _OctreeNode) -> dict:
             0.0,  0.0,  h[2],
         ]},
         "geometricError": 0.0 if node.is_leaf else node.geometric_error,
-        "refine": "ADD",
+        "refine": "REPLACE",
     }
     if node.is_leaf:
         tile["content"] = {"uri": node.tile_id}
@@ -380,8 +383,10 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
                          world_transform: "np.ndarray | None" = None) -> dict:
     """Like ``_build_tileset`` but builds a recursive tree from an octree.
 
-    The similarity transform is applied identically to the original — only
-    the tile structure below the root changes.
+    Child/leaf bounding volumes stay in local scene space (Cesium interprets
+    them relative to the root transform). The root bounding volume is expressed
+    in ECEF so Cesium can correctly anchor and cull the tileset against the
+    globe — without the tileset floating or disappearing on pan/zoom.
     """
     s = float(sim.get("scale", sim.get("s")))
     R = np.array(sim.get("rotation", sim.get("R")), dtype=np.float64).reshape(3, 3)
@@ -394,8 +399,28 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     if world_transform is not None:
         M = M @ world_transform
 
+    # ── Root bounding volume in scene-space box ──────────────────────────────
+    # Keep bounding volume in scene-space (same as child tiles).
+    # Cesium applies the root transform matrix to interpret the box correctly.
+    # This matches the format of the original single-tile tileset that
+    # renders correctly in both local CesiumJS and Cesium ion.
+    pmin = root_node.pmin
+    pmax = root_node.pmax
+    center = (pmin + pmax) * 0.5
+    half   = (pmax - pmin) * 0.5
+
+    scene_diagonal = float(np.linalg.norm(pmax - pmin))
+    geom_err_m = float(scene_diagonal * s)
+
     root_tile = _node_to_tile_dict(root_node)
-    root_tile["transform"] = M.T.flatten().tolist()
+    root_tile["transform"]      = M.T.flatten().tolist()
+    root_tile["geometricError"] = geom_err_m
+    root_tile["boundingVolume"] = {"box": [
+        float(center[0]), float(center[1]), float(center[2]),
+        float(half[0]),   0.0,              0.0,
+        0.0,              float(half[1]),   0.0,
+        0.0,              0.0,              float(half[2]),
+    ]}
 
     return {
         "asset": {"version": "1.1"},
@@ -413,7 +438,7 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
                 ],
             }
         },
-        "geometricError": root_node.geometric_error,
+        "geometricError": geom_err_m,
         "root": root_tile,
     }
 

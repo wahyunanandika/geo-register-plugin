@@ -6,7 +6,7 @@ class MetashapeXMLError(Exception):
     pass
 
 
-def parse_metashape_xml(path: str) -> list[dict]:
+def parse_metashape_xml(path: str, include_scene_pos: bool = False) -> list[dict]:
     """Return [{name, lat, lon, alt}, ...] from a Metashape camera XML file.
 
     All enabled chunks with a GEOGCS (EPSG:4326) CRS are merged into a single
@@ -15,6 +15,15 @@ def parse_metashape_xml(path: str) -> list[dict]:
 
     For GEOGCS chunks, camera <reference> x/y/z are lon/lat/alt (WGS-84).
     Cameras without a <reference> tag or with enabled="0" are skipped.
+
+    Parameters
+    ----------
+    include_scene_pos : bool
+        If True, each entry also contains scene_x, scene_y, scene_z —
+        the camera position in Metashape scene space (from <transform>).
+        Used as src_pts for the similarity transform solver when the caller
+        is the Metashape XML mode. Cameras whose <transform> tag is missing
+        or unparseable are skipped when this is True.
     """
     import logging
     import xml.etree.ElementTree as ET
@@ -77,12 +86,31 @@ def parse_metashape_xml(path: str) -> list[dict]:
             if x_str is None or y_str is None or z_str is None:
                 continue
 
-            gps_list.append({
+            entry: dict = {
                 "name": Path(label).stem,
-                "lat": float(y_str),
-                "lon": float(x_str),
-                "alt": float(z_str),
-            })
+                "lat":  float(y_str),
+                "lon":  float(x_str),
+                "alt":  float(z_str),
+            }
+
+            # When include_scene_pos=True, also extract the camera position in
+            # Metashape scene space from the <transform> tag (4x4 row-major
+            # matrix; translation is at indices [3], [7], [11]).
+            # Cameras whose <transform> is absent or corrupt are skipped so the
+            # solver always receives a consistent (src, dst) pair.
+            if include_scene_pos:
+                tf = camera.find("transform")
+                if tf is None:
+                    continue
+                try:
+                    vals = list(map(float, tf.text.split()))
+                    entry["scene_x"] = vals[3]
+                    entry["scene_y"] = vals[7]
+                    entry["scene_z"] = vals[11]
+                except Exception:
+                    continue
+
+            gps_list.append(entry)
 
         added = len(gps_list) - before
         total_cameras_seen += chunk_cameras

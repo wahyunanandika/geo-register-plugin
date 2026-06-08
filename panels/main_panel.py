@@ -103,9 +103,6 @@ class MainPanel(lf.ui.Panel):
         scale = layout.get_dpi_scale()
         theme = lf.ui.theme()
 
-        # If no cameras are present the user has switched to Edit Mode and the
-        # dataset (including camera data) has been discarded.  Geo-registration
-        # requires camera information, so show a blocking notice and return.
         scene = lf.get_scene()
         if scene is not None:
             import lichtfeld.scene as lf_scene
@@ -117,7 +114,6 @@ class MainPanel(lf.ui.Panel):
         layout.label("Detect / Add Geo Reference")
         layout.separator()
 
-        # Mode selector
         layout.label("Source:")
         layout.same_line()
         changed, new_idx = layout.combo("##geo_mode", self._mode_idx, self._MODES)
@@ -140,14 +136,12 @@ class MainPanel(lf.ui.Panel):
         else:
             self._draw_metashape_xml_section(layout, scale, theme)
 
-        # Status line
         if self._status:
             layout.spacing()
             prefix = "[!] " if self._status_is_error else "[ok] "
             color  = (1.0, 0.4, 0.4, 1.0) if self._status_is_error else (0.4, 1.0, 0.4, 1.0)
             layout.text_colored(prefix + self._status, color)
 
-        # Transform result + pick section
         if self._transform is not None:
             self._draw_transform_section(layout, scale, theme)
             self._draw_export_section(layout, scale, theme)
@@ -197,7 +191,6 @@ class MainPanel(lf.ui.Panel):
 
         layout.separator()
 
-        # Pick location button / stop picking button
         if self._picking:
             if layout.button_styled("Stop Picking##geo_pick_stop", "error", (-1, 32 * scale)):
                 self._cancel_pick()
@@ -206,7 +199,6 @@ class MainPanel(lf.ui.Panel):
             if layout.button_styled("Get Pixel Location##geo_pick_start", "primary", (-1, 32 * scale)):
                 self._start_pick()
 
-        # LLA result
         if self._lla is not None:
             self._draw_lla_section(layout, scale, theme)
 
@@ -330,6 +322,11 @@ class MainPanel(lf.ui.Panel):
         self._run_georeg(gps_list)
 
     def _run_georeg(self, gps_list: list) -> None:
+        """Solve similarity transform using LFS scene camera positions as src_pts.
+
+        Used by EXIF, CSV, and RealityScan modes — where we only have GPS
+        coordinates and must match them to camera poses from the loaded scene.
+        """
         from lfs_plugins.ui.state import AppState
         from ..geo.camera_reader import read_camera_positions_from_scene
         from ..geo.ecef import geodetic_to_ecef
@@ -368,18 +365,63 @@ class MainPanel(lf.ui.Panel):
             lf.log.warn(f"geo_register: {msg}")
             return
 
+        self._run_solver(src_pts, dst_pts, matched_gps)
+
+    def _run_georeg_from_xml(self, gps_list: list) -> None:
+        """Solve similarity transform using Metashape scene positions as src_pts.
+
+        Used exclusively by the Metashape XML mode. Unlike _run_georeg, this
+        method reads src_pts directly from the <transform> tag in the XML
+        (Metashape scene space) rather than from the LFS scene API.
+
+        This is necessary because LFS world-space camera positions carry
+        altitude information in their Z component that conflicts with the
+        altitude encoded in dst_pts (ECEF), causing the solver to produce
+        a translation with ~0m altitude. Metashape scene-space positions
+        have Z values in the range of a few metres (centred near zero),
+        so the solver can recover the correct altitude purely from dst_pts.
+        """
+        from lfs_plugins.ui.state import AppState
+        from ..geo.ecef import geodetic_to_ecef
+
+        scene_path = AppState.scene_path.value
+        if not scene_path or lf.get_scene() is None:
+            self._set_status("No scene is currently loaded.", error=True)
+            return
+
+        src_pts: list = []
+        dst_pts: list = []
+        matched_gps: list = []
+        for entry in gps_list:
+            src_pts.append([entry["scene_x"], entry["scene_y"], entry["scene_z"]])
+            dst_pts.append(geodetic_to_ecef(entry["lat"], entry["lon"], entry["alt"]))
+            matched_gps.append(entry)
+
+        if len(src_pts) < 3:
+            self._set_status(f"Only {len(src_pts)} cameras with scene positions. Need at least 3.", error=True)
+            return
+
+        self._run_solver(src_pts, dst_pts, matched_gps)
+
+    def _run_solver(self, src_pts: list, dst_pts: list, matched_gps: list) -> None:
+        """Run RANSAC+IRLS solver and store the result. Shared by all georeg paths."""
+        from lfs_plugins.ui.state import AppState
+        from ..geo.transform import robust_umeyama
+        import json
+
+        scene_path = AppState.scene_path.value
+
         lf.log.info(f"geo_register: {len(src_pts)} correspondences - running RANSAC+IRLS ...")
         try:
-            import json
             _cfg_path = Path(__file__).parent.parent / "config.json"
             _cfg = json.loads(_cfg_path.read_text(encoding="utf-8")) if _cfg_path.exists() else {}
             result = robust_umeyama(
                 src_pts, dst_pts,
-                inlier_thr     = float(_cfg.get("ransac_inlier_thr_m",  10.0)),
-                confidence     = float(_cfg.get("ransac_confidence",      0.99)),
-                max_ransac_iter= int(  _cfg.get("ransac_max_iter",        2000)),
-                huber_delta    = float(_cfg.get("irls_huber_delta_m",     2.0)),
-                max_irls_iter  = int(  _cfg.get("irls_max_iter",          50)),
+                inlier_thr      = float(_cfg.get("ransac_inlier_thr_m",  10.0)),
+                confidence      = float(_cfg.get("ransac_confidence",      0.99)),
+                max_ransac_iter = int(  _cfg.get("ransac_max_iter",        2000)),
+                huber_delta     = float(_cfg.get("irls_huber_delta_m",     2.0)),
+                max_irls_iter   = int(  _cfg.get("irls_max_iter",          50)),
             )
         except Exception as exc:
             self._set_status(f"Transform estimation failed: {exc}", error=True)
@@ -428,7 +470,6 @@ class MainPanel(lf.ui.Panel):
             gps_list = []
             with open(path, "r", encoding="utf-8", newline="") as f:
                 lines = f.read().splitlines()
-            # Strip leading # from header line if present
             if lines and lines[0].startswith("#"):
                 lines[0] = lines[0].lstrip("#").strip()
             import io
@@ -437,20 +478,17 @@ class MainPanel(lf.ui.Panel):
             required = {"image_name", "lat", "lon", "alt"}
             if set(fieldnames) != required:
                 raise ValueError(f"Invalid CSV header. Expected columns: {required}, got {set(fieldnames)}")
-            
-            # Find column indices for any order
-            lat_idx = fieldnames.index("lat")
-            lon_idx = fieldnames.index("lon")
-            alt_idx = fieldnames.index("alt")
+            lat_idx   = fieldnames.index("lat")
+            lon_idx   = fieldnames.index("lon")
+            alt_idx   = fieldnames.index("alt")
             image_idx = fieldnames.index("image_name")
-            
             for row in reader:
                 values = list(row.values())
                 gps_list.append({
                     "name": Path(values[image_idx]).stem,
-                    "lat": float(values[lat_idx]),
-                    "lon": float(values[lon_idx]),
-                    "alt": float(values[alt_idx]),
+                    "lat":  float(values[lat_idx]),
+                    "lon":  float(values[lon_idx]),
+                    "alt":  float(values[alt_idx]),
                 })
         except Exception as exc:
             self._set_status(f"Failed to parse CSV: {exc}", error=True)
@@ -487,15 +525,14 @@ class MainPanel(lf.ui.Panel):
             gps_list = []
             with open(path, "r", encoding="utf-8", newline="") as f:
                 lines = f.read().splitlines()
-            # Strip leading # from header line if present
             if lines and lines[0].startswith("#"):
                 lines[0] = lines[0].lstrip("#").strip()
             reader = csv.DictReader(io.StringIO("\n".join(lines)))
             for row in reader:
                 gps_list.append({
                     "name": Path(row["name"]).stem,
-                    "lat":  float(row["y"]),   # RealityScan: y = latitude
-                    "lon":  float(row["x"]),   # RealityScan: x = longitude
+                    "lat":  float(row["y"]),
+                    "lon":  float(row["x"]),
                     "alt":  float(row["alt"]),
                 })
         except Exception as exc:
@@ -519,6 +556,9 @@ class MainPanel(lf.ui.Panel):
             self._load_metashape_xml_file()
 
     def _load_metashape_xml_file(self) -> None:
+        # include_scene_pos=True: also extract Metashape scene-space positions
+        # from <transform> tags, which are used as src_pts for the solver.
+        # See _run_georeg_from_xml for why this is needed instead of LFS API positions.
         from ..geo.metashape_parser import parse_metashape_xml, MetashapeXMLError
 
         path = lf.ui.open_xml_file_dialog()
@@ -530,7 +570,7 @@ class MainPanel(lf.ui.Panel):
         self._clear_point()
 
         try:
-            gps_list = parse_metashape_xml(path)
+            gps_list = parse_metashape_xml(path, include_scene_pos=True)
         except MetashapeXMLError as exc:
             self._set_status(str(exc), error=True)
             lf.log.error(f"geo_register: {exc}")
@@ -548,7 +588,7 @@ class MainPanel(lf.ui.Panel):
             return
 
         lf.log.info(f"geo_register: loaded {len(gps_list)} camera positions from Metashape XML '{path}'")
-        self._run_georeg(gps_list)
+        self._run_georeg_from_xml(gps_list)
 
     def _load_similarity_file(self) -> None:
         import json
@@ -583,7 +623,6 @@ class MainPanel(lf.ui.Panel):
                 "n_total":   data.get("n_total",   n),
             }
 
-            # Copy to output dir if the file is not already there
             copied_to = None
             output_path = lf.dataset_params().output_path
             if output_path:
@@ -794,7 +833,6 @@ class MainPanel(lf.ui.Panel):
             return
 
         node = nodes[self._export_splat_idx]
-
         self._export_progress = 0.0
         self._export_error    = None
         self._export_success  = None
@@ -837,7 +875,6 @@ class MainPanel(lf.ui.Panel):
 
         out_dir = Path(self._tiles_out_dir)
 
-        # Conflict check
         for fname in ("tileset.json", "splats.glb"):
             if (out_dir / fname).exists():
                 self._tiles_error = (
@@ -917,7 +954,6 @@ class MainPanel(lf.ui.Panel):
         layout.separator()
         layout.spacing()
 
-        # PLY file
         layout.label("PLY File:")
         if self._ply_file_path:
             layout.text_colored(Path(self._ply_file_path).name, theme.palette.text_dim)
@@ -930,7 +966,6 @@ class MainPanel(lf.ui.Panel):
 
         layout.spacing()
 
-        # Similarity JSON
         layout.label("Similarity Transform JSON:")
         if self._ply_sim_path:
             layout.text_colored(Path(self._ply_sim_path).name, theme.palette.text_dim)
@@ -949,7 +984,6 @@ class MainPanel(lf.ui.Panel):
         layout.spacing()
         layout.separator()
 
-        # Format
         layout.label("Format:")
         layout.same_line()
         fmt_changed, fmt_idx = layout.combo(
@@ -970,7 +1004,6 @@ class MainPanel(lf.ui.Panel):
 
         layout.spacing()
 
-        # Output
         if self._ply_format_idx in (0, 1):
             if self._ply_out_file:
                 layout.text_colored(self._ply_out_file, theme.palette.text_dim)
@@ -1040,7 +1073,6 @@ class MainPanel(lf.ui.Panel):
         import json
         import threading
 
-        # Load similarity transform
         try:
             with open(self._ply_sim_path, "r", encoding="utf-8") as f:
                 sim_data = json.load(f)
@@ -1058,7 +1090,6 @@ class MainPanel(lf.ui.Panel):
             lf.ui.request_redraw()
             return
 
-        # For LAS/LAZ: open save dialog
         if self._ply_format_idx in (0, 1):
             splat_name = Path(self._ply_file_path).stem
             if self._ply_format_idx == 1:
@@ -1075,7 +1106,6 @@ class MainPanel(lf.ui.Panel):
                 return
             self._ply_out_file = out_path
         else:
-            # 3D Tiles: conflict check
             out_dir = Path(self._ply_out_dir)
             for fname in ("tileset.json", "splats.glb"):
                 if (out_dir / fname).exists():
@@ -1112,8 +1142,6 @@ class MainPanel(lf.ui.Panel):
                 from ..geo.tiles_exporter import _read_ply, _build_from_ply, _export_from_arrays, DIM_FOR_DEGREE
                 from pathlib import Path as _P
                 ply_data, names = _read_ply(_P(ply_path))
-                # f_rest_* props are flat RGB triples, so /3 gives per-channel coef count.
-                # Find the highest complete SH degree the PLY contains, then cap at user's choice.
                 rest_names = [nm for nm in names if nm.startswith("f_rest_")]
                 k = len(rest_names) // 3 if rest_names and len(rest_names) % 3 == 0 else 0
                 actual_sh = max(d for d in range(4) if DIM_FOR_DEGREE[d] <= k)
