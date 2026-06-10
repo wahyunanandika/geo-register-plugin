@@ -285,12 +285,17 @@ def _assign_tile_ids(node: _OctreeNode, counter: list) -> None:
             _assign_tile_ids(child, counter)
 
 
-def _node_to_tile_dict(node: _OctreeNode, s: float = 1.0) -> dict:
+def _node_to_tile_dict(node: _OctreeNode) -> dict:
     """Recursively convert an _OctreeNode to a 3D Tiles tile dict.
 
-    Child bounding volumes are in scene/local space (NOT scaled).
-    Cesium applies the root transform matrix to interpret them correctly.
-    geometricError for internal nodes is in metres (scene units × s).
+    ``geometricError`` is set to the bbox diagonal for internal nodes so
+    Cesium's SSE test drives refinement correctly, and to 0 for leaves
+    (no finer representation exists).  Without this, a single-tile export
+    with a large geometricError causes Cesium to wait for children that
+    never arrive — the scene appears blank.
+
+    Bounding volumes here are in scene/local space. The root tile's bounding
+    volume is overridden with an ECEF bounding volume in _build_tileset_tiled.
     """
     c = node.center.tolist()
     h = node.half_axes.tolist()
@@ -307,7 +312,7 @@ def _node_to_tile_dict(node: _OctreeNode, s: float = 1.0) -> dict:
     if node.is_leaf:
         tile["content"] = {"uri": node.tile_id}
     else:
-        tile["children"] = [_node_to_tile_dict(c, s) for c in node.children]
+        tile["children"] = [_node_to_tile_dict(c) for c in node.children]
     return tile
 
 
@@ -394,21 +399,20 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     if world_transform is not None:
         M = M @ world_transform
 
-    # ── Root bounding volume in scene-space box (NOT scaled) ─────────────────
-    # Child tiles stay in scene-space. Root tile same format.
-    # Cesium applies root transform matrix to interpret them in world space.
-    # This matches asset 4909488 (scale=1.0) which rendered correctly.
-    # With scale=1.0, scene-space ≈ metres so no issue.
-    # With scale=12.79, Cesium still applies M correctly via the transform matrix.
+    # ── Root bounding volume in scene-space box ──────────────────────────────
+    # Keep bounding volume in scene-space (same as child tiles).
+    # Cesium applies the root transform matrix to interpret the box correctly.
+    # This matches the format of the original single-tile tileset that
+    # renders correctly in both local CesiumJS and Cesium ion.
     pmin = root_node.pmin
     pmax = root_node.pmax
     center = (pmin + pmax) * 0.5
     half   = (pmax - pmin) * 0.5
 
     scene_diagonal = float(np.linalg.norm(pmax - pmin))
-    geom_err_m     = scene_diagonal  # scene-space units, consistent with children
+    geom_err_m = float(scene_diagonal * s)
 
-    root_tile = _node_to_tile_dict(root_node, s)
+    root_tile = _node_to_tile_dict(root_node)
     root_tile["transform"]      = M.T.flatten().tolist()
     root_tile["geometricError"] = geom_err_m
     root_tile["boundingVolume"] = {"box": [
@@ -434,7 +438,8 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
                 ],
             }
         },
-        "geometricError": geom_err_m,  # scene-space, consistent with all tiles
+        "geometricError": geom_err_m,
+        "root": root_tile,
     }
 
 
