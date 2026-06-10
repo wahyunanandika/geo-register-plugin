@@ -288,23 +288,12 @@ def _assign_tile_ids(node: _OctreeNode, counter: list) -> None:
 def _node_to_tile_dict(node: _OctreeNode, s: float = 1.0) -> dict:
     """Recursively convert an _OctreeNode to a 3D Tiles tile dict.
 
-    ``geometricError`` is set to the bbox diagonal for internal nodes so
-    Cesium's SSE test drives refinement correctly, and to 0 for leaves
-    (no finer representation exists).  Without this, a single-tile export
-    with a large geometricError causes Cesium to wait for children that
-    never arrive — the scene appears blank.
-
-    Bounding volumes are in scene/local space, scaled by similarity scale s
-    so Cesium interprets them correctly in metres. The root tile's bounding
-    volume is overridden with an ECEF sphere in _build_tileset_tiled.
-
-    Parameters
-    ----------
-    node : _OctreeNode
-    s    : float — similarity scale factor (scene units → metres)
+    Child bounding volumes are in scene/local space (NOT scaled).
+    Cesium applies the root transform matrix to interpret them correctly.
+    geometricError for internal nodes is in metres (scene units × s).
     """
-    c = (node.center * s).tolist()
-    h = (node.half_axes * s).tolist()
+    c = node.center.tolist()
+    h = node.half_axes.tolist()
     tile: dict = {
         "boundingVolume": {"box": [
             c[0], c[1], c[2],
@@ -405,9 +394,12 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     if world_transform is not None:
         M = M @ world_transform
 
-    # ── Root bounding volume in scene-space box (scaled to metres) ───────────
-    # Child tiles use scene-space box × s (metres). Root tile same format.
-    # Cesium applies root transform matrix to interpret them correctly.
+    # ── Root bounding volume in scene-space box (NOT scaled) ─────────────────
+    # Child tiles stay in scene-space. Root tile same format.
+    # Cesium applies root transform matrix to interpret them in world space.
+    # This matches asset 4909488 (scale=1.0) which rendered correctly.
+    # With scale=1.0, scene-space ≈ metres so no issue.
+    # With scale=12.79, Cesium still applies M correctly via the transform matrix.
     pmin = root_node.pmin
     pmax = root_node.pmax
     center = (pmin + pmax) * 0.5
@@ -420,10 +412,10 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     root_tile["transform"]      = M.T.flatten().tolist()
     root_tile["geometricError"] = geom_err_m
     root_tile["boundingVolume"] = {"box": [
-        float(center[0] * s), float(center[1] * s), float(center[2] * s),
-        float(half[0] * s),   0.0,                  0.0,
-        0.0,                  float(half[1] * s),   0.0,
-        0.0,                  0.0,                  float(half[2] * s),
+        float(center[0]), float(center[1]), float(center[2]),
+        float(half[0]),   0.0,              0.0,
+        0.0,              float(half[1]),   0.0,
+        0.0,              0.0,              float(half[2]),
     ]}
 
     return {
