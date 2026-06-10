@@ -324,8 +324,12 @@ class MainPanel(lf.ui.Panel):
     def _run_georeg(self, gps_list: list) -> None:
         """Solve similarity transform using LFS scene camera positions as src_pts.
 
-        Used by EXIF, CSV, and RealityScan modes — where we only have GPS
-        coordinates and must match them to camera poses from the loaded scene.
+        Used by EXIF, CSV, RealityScan, and Metashape XML modes.
+        src_pts = LFS world-space camera positions (same space as PLY positions).
+        dst_pts = GPS coordinates from the input source.
+
+        This ensures the resulting similarity transform is compatible with PLY
+        model-local space, which matches LFS world-space (scale ~1.0).
         """
         from lfs_plugins.ui.state import AppState
         from ..geo.camera_reader import read_camera_positions_from_scene
@@ -363,42 +367,6 @@ class MainPanel(lf.ui.Panel):
             )
             self._set_status(msg, error=True)
             lf.log.warn(f"geo_register: {msg}")
-            return
-
-        self._run_solver(src_pts, dst_pts, matched_gps)
-
-    def _run_georeg_from_xml(self, gps_list: list) -> None:
-        """Solve similarity transform using Metashape scene positions as src_pts.
-
-        Used exclusively by the Metashape XML mode. Unlike _run_georeg, this
-        method reads src_pts directly from the <transform> tag in the XML
-        (Metashape scene space) rather than from the LFS scene API.
-
-        This is necessary because LFS world-space camera positions carry
-        altitude information in their Z component that conflicts with the
-        altitude encoded in dst_pts (ECEF), causing the solver to produce
-        a translation with ~0m altitude. Metashape scene-space positions
-        have Z values in the range of a few metres (centred near zero),
-        so the solver can recover the correct altitude purely from dst_pts.
-        """
-        from lfs_plugins.ui.state import AppState
-        from ..geo.ecef import geodetic_to_ecef
-
-        scene_path = AppState.scene_path.value
-        if not scene_path or lf.get_scene() is None:
-            self._set_status("No scene is currently loaded.", error=True)
-            return
-
-        src_pts: list = []
-        dst_pts: list = []
-        matched_gps: list = []
-        for entry in gps_list:
-            src_pts.append([entry["scene_x"], entry["scene_y"], entry["scene_z"]])
-            dst_pts.append(geodetic_to_ecef(entry["lat"], entry["lon"], entry["alt"]))
-            matched_gps.append(entry)
-
-        if len(src_pts) < 3:
-            self._set_status(f"Only {len(src_pts)} cameras with scene positions. Need at least 3.", error=True)
             return
 
         self._run_solver(src_pts, dst_pts, matched_gps)
@@ -556,9 +524,15 @@ class MainPanel(lf.ui.Panel):
             self._load_metashape_xml_file()
 
     def _load_metashape_xml_file(self) -> None:
-        # include_scene_pos=True: also extract Metashape scene-space positions
-        # from <transform> tags, which are used as src_pts for the solver.
-        # See _run_georeg_from_xml for why this is needed instead of LFS API positions.
+        """Load Metashape XML and solve similarity transform.
+
+        Uses LFS world-space camera positions as src_pts (via _run_georeg),
+        which are in the same coordinate space as PLY model-local positions.
+        This ensures scale ~1.0 and correct render in Cesium.
+
+        GPS coordinates are read from the XML <reference> tags (GPS PPK),
+        giving accurate geodetic positioning (RMSE < 0.1m).
+        """
         from ..geo.metashape_parser import parse_metashape_xml, MetashapeXMLError
 
         path = lf.ui.open_xml_file_dialog()
@@ -570,7 +544,9 @@ class MainPanel(lf.ui.Panel):
         self._clear_point()
 
         try:
-            gps_list = parse_metashape_xml(path, include_scene_pos=True)
+            # No include_scene_pos — we use LFS camera API for src_pts,
+            # not Metashape scene-space positions, to stay compatible with PLY space.
+            gps_list = parse_metashape_xml(path)
         except MetashapeXMLError as exc:
             self._set_status(str(exc), error=True)
             lf.log.error(f"geo_register: {exc}")
@@ -588,7 +564,8 @@ class MainPanel(lf.ui.Panel):
             return
 
         lf.log.info(f"geo_register: loaded {len(gps_list)} camera positions from Metashape XML '{path}'")
-        self._run_georeg_from_xml(gps_list)
+        # Use LFS camera API positions as src_pts — same space as PLY positions.
+        self._run_georeg(gps_list)
 
     def _load_similarity_file(self) -> None:
         import json
