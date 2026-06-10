@@ -215,7 +215,7 @@ def _auto_max_splats(n_total: int) -> int:
         <  500k  → 20 000  (~25  tiles)
         < 2 M    → 30 000  (~66  tiles)
         < 10 M   → 50 000  (~200 tiles)
-        < 20 M   → 75 000  (~133–266 tiles)
+        < 20 M   → 75 000  (~266 tiles)
         >= 20 M  → 100 000 (~200–300 tiles)
     """
     if n_total < 500_000:
@@ -402,15 +402,15 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     # ── Root bounding volume in scene-space box ──────────────────────────────
     # Keep bounding volume in scene-space (same as child tiles).
     # Cesium applies the root transform matrix to interpret the box correctly.
-    # This matches the format of the original single-tile tileset that
-    # renders correctly in both local CesiumJS and Cesium ion.
+    # geometricError is the scene-space bbox diagonal — same convention as
+    # child tiles in _node_to_tile_dict. Do NOT multiply by s here; the
+    # transform matrix already encodes the scale for Cesium's SSE computation.
     pmin = root_node.pmin
     pmax = root_node.pmax
     center = (pmin + pmax) * 0.5
     half   = (pmax - pmin) * 0.5
 
-    scene_diagonal = float(np.linalg.norm(pmax - pmin))
-    geom_err_m = float(scene_diagonal * s)
+    geom_err_m = float(np.linalg.norm(pmax - pmin))  # FIX: removed * s
 
     root_tile = _node_to_tile_dict(root_node)
     root_tile["transform"]      = M.T.flatten().tolist()
