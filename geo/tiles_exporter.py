@@ -399,27 +399,30 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     if world_transform is not None:
         M = M @ world_transform
 
-    # ── Root bounding volume in scene-space box ──────────────────────────────
-    # Keep bounding volume in scene-space (same as child tiles).
-    # Cesium applies the root transform matrix to interpret the box correctly.
-    # This matches the format of the original single-tile tileset that
-    # renders correctly in both local CesiumJS and Cesium ion.
+    # ── Root bounding volume in ECEF ─────────────────────────────────────────
+    # The translation vector t is the ECEF position of the scene origin (0,0,0).
+    # We use t as the bounding sphere center because:
+    # - Scene center from octree bbox is in model-local space (PLY coords)
+    # - Transforming it via M gives wrong results because PLY space ≠ Metashape scene space
+    # - t is already verified correct (matches GPS PPK to 4cm)
+    #
+    # Radius = scene_diagonal * s * 0.5 * 1.1 (10% buffer)
+    # This correctly scales from scene units to metres.
     pmin = root_node.pmin
     pmax = root_node.pmax
-    center = (pmin + pmax) * 0.5
-    half   = (pmax - pmin) * 0.5
 
     scene_diagonal = float(np.linalg.norm(pmax - pmin))
-    geom_err_m = float(scene_diagonal * s)
+    geom_err_m     = float(scene_diagonal * s)
+    sphere_radius  = scene_diagonal * s * 0.5 * 1.1
 
     root_tile = _node_to_tile_dict(root_node)
     root_tile["transform"]      = M.T.flatten().tolist()
     root_tile["geometricError"] = geom_err_m
-    root_tile["boundingVolume"] = {"box": [
-        float(center[0]), float(center[1]), float(center[2]),
-        float(half[0]),   0.0,              0.0,
-        0.0,              float(half[1]),   0.0,
-        0.0,              0.0,              float(half[2]),
+    root_tile["boundingVolume"] = {"sphere": [
+        float(t[0]),
+        float(t[1]),
+        float(t[2]),
+        float(sphere_radius),
     ]}
 
     return {
