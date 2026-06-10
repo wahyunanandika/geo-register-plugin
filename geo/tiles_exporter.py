@@ -285,7 +285,7 @@ def _assign_tile_ids(node: _OctreeNode, counter: list) -> None:
             _assign_tile_ids(child, counter)
 
 
-def _node_to_tile_dict(node: _OctreeNode) -> dict:
+def _node_to_tile_dict(node: _OctreeNode, s: float = 1.0) -> dict:
     """Recursively convert an _OctreeNode to a 3D Tiles tile dict.
 
     ``geometricError`` is set to the bbox diagonal for internal nodes so
@@ -294,11 +294,17 @@ def _node_to_tile_dict(node: _OctreeNode) -> dict:
     with a large geometricError causes Cesium to wait for children that
     never arrive — the scene appears blank.
 
-    Bounding volumes here are in scene/local space. The root tile's bounding
-    volume is overridden with an ECEF bounding volume in _build_tileset_tiled.
+    Bounding volumes are in scene/local space, scaled by similarity scale s
+    so Cesium interprets them correctly in metres. The root tile's bounding
+    volume is overridden with an ECEF sphere in _build_tileset_tiled.
+
+    Parameters
+    ----------
+    node : _OctreeNode
+    s    : float — similarity scale factor (scene units → metres)
     """
-    c = node.center.tolist()
-    h = node.half_axes.tolist()
+    c = (node.center * s).tolist()
+    h = (node.half_axes * s).tolist()
     tile: dict = {
         "boundingVolume": {"box": [
             c[0], c[1], c[2],
@@ -306,13 +312,13 @@ def _node_to_tile_dict(node: _OctreeNode) -> dict:
             0.0,  h[1], 0.0,
             0.0,  0.0,  h[2],
         ]},
-        "geometricError": 0.0 if node.is_leaf else node.geometric_error,
+        "geometricError": 0.0 if node.is_leaf else node.geometric_error * s,
         "refine": "REPLACE",
     }
     if node.is_leaf:
         tile["content"] = {"uri": node.tile_id}
     else:
-        tile["children"] = [_node_to_tile_dict(c) for c in node.children]
+        tile["children"] = [_node_to_tile_dict(c, s) for c in node.children]
     return tile
 
 
@@ -415,7 +421,7 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     geom_err_m     = float(scene_diagonal * s)
     sphere_radius  = scene_diagonal * s * 0.5 * 1.1
 
-    root_tile = _node_to_tile_dict(root_node)
+    root_tile = _node_to_tile_dict(root_node, s)
     root_tile["transform"]      = M.T.flatten().tolist()
     root_tile["geometricError"] = geom_err_m
     root_tile["boundingVolume"] = {"sphere": [
