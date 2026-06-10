@@ -198,10 +198,10 @@ class _OctreeNode:
 
 
 def _auto_max_splats(n_total):
-    if n_total < 500_000:   return 20_000
-    if n_total < 2_000_000: return 30_000
-    if n_total < 10_000_000:return 50_000
-    if n_total < 20_000_000:return 75_000
+    if n_total < 500_000:    return 20_000
+    if n_total < 2_000_000:  return 30_000
+    if n_total < 10_000_000: return 50_000
+    if n_total < 20_000_000: return 75_000
     return 100_000
 
 
@@ -283,7 +283,6 @@ def _build_tileset(sim, positions, content_uri, world_transform=None):
         M = M @ world_transform
 
     transform_col_major = M.T.flatten().tolist()
-
     pmin = positions.min(axis=0)
     pmax = positions.max(axis=0)
     center = (pmin + pmax) * 0.5
@@ -331,7 +330,6 @@ def _build_tileset_tiled(sim, root_node, world_transform=None):
     pmax = root_node.pmax
     center = (pmin + pmax) * 0.5
     half   = (pmax - pmin) * 0.5
-
     geom_err_m = float(np.linalg.norm(pmax - pmin))  # FIX: no * s
 
     root_tile = _node_to_tile_dict(root_node)
@@ -430,8 +428,6 @@ def export_3dtiles(
     max_splats_per_tile: int = 0,
     min_tile_size: float = 0.1,
 ) -> None:
-    import lichtfeld as lf
-
     out_dir = Path(out_dir)
 
     sim = {
@@ -452,11 +448,20 @@ def export_3dtiles(
 
     W = np.asarray(node.world_transform, dtype=np.float64).reshape(4, 4)
 
-    # ── DEBUG: log world_transform ────────────────────────────────────────────
-    lf.log.info(f"[DEBUG] world_transform W =\n{W}")
-    lf.log.info(f"[DEBUG] W is identity: {np.allclose(W, np.eye(4))}")
-    lf.log.info(f"[DEBUG] W translation: {W[:3, 3]}")
-    lf.log.info(f"[DEBUG] W scale: {np.linalg.norm(W[:3, 0]):.6f}")
+    # ── DEBUG: print ke console DAN tulis ke file ─────────────────────────────
+    dbg_lines = [
+        f"W =\n{W}",
+        f"W is identity: {np.allclose(W, np.eye(4))}",
+        f"W translation: {W[:3, 3].tolist()}",
+        f"W scale: {np.linalg.norm(W[:3, 0]):.6f}",
+        f"means_raw sample (first 3): {node.splat_data().means_raw.cpu().numpy()[:3].tolist()}",
+    ]
+    for line in dbg_lines:
+        print(f"[DEBUG] {line}")
+    dbg_path = out_dir / "debug_W.txt"
+    with open(dbg_path, "w") as dbg_f:
+        dbg_f.write("\n".join(dbg_lines) + "\n")
+    print(f"[DEBUG] written to {dbg_path}")
     # ── END DEBUG ─────────────────────────────────────────────────────────────
 
     means = np.asarray(splat_data.means_raw.cpu().numpy(), dtype=np.float32)
