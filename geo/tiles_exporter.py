@@ -301,7 +301,7 @@ def _node_to_tile_dict(node: _OctreeNode, s: float = 1.0) -> dict:
             0.0,  h[1], 0.0,
             0.0,  0.0,  h[2],
         ]},
-        "geometricError": 0.0 if node.is_leaf else node.geometric_error * s,
+        "geometricError": 0.0 if node.is_leaf else node.geometric_error,
         "refine": "REPLACE",
     }
     if node.is_leaf:
