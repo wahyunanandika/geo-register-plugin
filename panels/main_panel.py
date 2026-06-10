@@ -5,7 +5,6 @@ import lichtfeld as lf
 
 _OP_ID = "lfs_plugins.geo_register_pluggin.operators.geo_picker.GEO_OT_pick_location"
 
-# Module-level world position so the draw handler can access it without a panel ref.
 _active_world_pos: tuple | None = None
 
 
@@ -36,13 +35,13 @@ class MainPanel(lf.ui.Panel):
         self._status_is_error                = False
         self._transform: dict | None         = None
         self._picking: bool                  = False
-        self._lla: tuple | None              = None   # (lat, lon, alt) from last pick
-        self._world_pos: tuple | None        = None   # local 3-D position of last pick
-        self._orig_images_folder: str | None = None   # override folder for EXIF scan
+        self._lla: tuple | None              = None
+        self._world_pos: tuple | None        = None
+        self._orig_images_folder: str | None = None
         self._export_splat_idx: int           = 0
-        self._export_format_idx: int         = 0      # 0=LAS, 1=LAZ, 2=3D Tiles (SPZ)
+        self._export_format_idx: int         = 0
         self._export_output_path: str | None = None
-        self._export_progress: float | None  = None   # None=idle, 0-1=running
+        self._export_progress: float | None  = None
         self._export_error: str | None       = None
         self._export_success: str | None     = None
         self._tiles_out_dir: str | None      = None
@@ -50,24 +49,22 @@ class MainPanel(lf.ui.Panel):
         self._tiles_error: str | None        = None
         self._tiles_success: str | None      = None
         self._tiles_max_sh: int              = 3
-        self._tiles_sh_info: tuple | None    = None   # (detected, user_bound, output)
-        # PLY converter (Edit Mode)
+        self._tiles_sh_info: tuple | None    = None
         self._ply_file_path: str | None      = None
         self._ply_sim_path: str | None       = None
-        self._ply_format_idx: int            = 2      # default to 3D Tiles
+        self._ply_format_idx: int            = 2
         self._ply_out_file: str | None       = None
         self._ply_out_dir: str | None        = None
         self._ply_progress: float | None     = None
         self._ply_error: str | None          = None
         self._ply_success: str | None        = None
         self._ply_max_sh: int                = 3
-        self._ply_sh_info: tuple | None      = None   # (detected, user_bound, output)
+        self._ply_sh_info: tuple | None      = None
+        self._dump_status: str               = ""
 
     @property
     def _mode(self) -> str:
         return self._MODE_KEYS[self._mode_idx]
-
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_scene_changed(self, doc):
         if self._picking:
@@ -93,11 +90,10 @@ class MainPanel(lf.ui.Panel):
         self._ply_progress        = None
         self._ply_error           = None
         self._ply_success         = None
+        self._dump_status         = ""
         self._clear_point()
         if doc is not None:
             self._detect_existing_registration()
-
-    # ── Draw ──────────────────────────────────────────────────────────────────
 
     def draw(self, layout):
         scale = layout.get_dpi_scale()
@@ -146,6 +142,72 @@ class MainPanel(lf.ui.Panel):
             self._draw_transform_section(layout, scale, theme)
             self._draw_export_section(layout, scale, theme)
 
+        # ── DEBUG: Dump World Transform button ────────────────────────────────
+        layout.separator()
+        layout.label("Debug")
+        if layout.button_styled("Dump World Transform##dump_wt", "warning", (-1, 28 * scale)):
+            self._dump_world_transform()
+        if self._dump_status:
+            layout.text_colored(self._dump_status, (0.8, 0.8, 0.2, 1.0))
+        # ── END DEBUG ─────────────────────────────────────────────────────────
+
+    def _dump_world_transform(self) -> None:
+        """Dump world_transform of all splat nodes to a txt file."""
+        import numpy as np
+        import lichtfeld.scene as lf_scene
+
+        scene = lf.get_scene()
+        if scene is None:
+            self._dump_status = "No scene loaded."
+            lf.ui.request_redraw()
+            return
+
+        nodes = list(scene.get_nodes(type=lf_scene.NodeType.SPLAT))
+        if not nodes:
+            self._dump_status = "No splat nodes found."
+            lf.ui.request_redraw()
+            return
+
+        lines = []
+        for node in nodes:
+            W = np.asarray(node.world_transform, dtype=np.float64).reshape(4, 4)
+            is_id = np.allclose(W, np.eye(4))
+            scale = np.linalg.norm(W[:3, 0])
+            lines.append(f"=== node: {node.name} ===")
+            lines.append(f"W =\n{W}")
+            lines.append(f"is_identity : {is_id}")
+            lines.append(f"W scale     : {scale:.6f}")
+            lines.append(f"W translation: {W[:3, 3].tolist()}")
+            lines.append("")
+
+            # Also dump means_raw sample
+            try:
+                sd = node.splat_data()
+                if sd is not None:
+                    means = sd.means_raw.cpu().numpy()[:5]
+                    lines.append(f"means_raw sample (first 5 rows):\n{means}")
+                    lines.append(f"means_raw Z range: {sd.means_raw.cpu().numpy()[:,2].min():.2f} to {sd.means_raw.cpu().numpy()[:,2].max():.2f}")
+                    lines.append("")
+            except Exception as e:
+                lines.append(f"means_raw error: {e}")
+                lines.append("")
+
+        # Write to output folder
+        from lfs_plugins.ui.state import AppState
+        import os
+        scene_path = AppState.scene_path.value
+        params = lf.dataset_params()
+        output_path = params.output_path if params else None
+        base = Path(output_path) if output_path else Path(scene_path) if scene_path else Path.home()
+        out_dir = base / "geo_register_plugin_data"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "debug_world_transform.txt"
+
+        out_file.write_text("\n".join(lines), encoding="utf-8")
+        lf.log.info(f"geo_register: world_transform dumped to '{out_file}'")
+        self._dump_status = f"Saved: {out_file}"
+        lf.ui.request_redraw()
+
     def _draw_exif_section(self, layout, scale, theme):
         layout.text_colored(
             "Scans dataset images for GPS EXIF tags,\n"
@@ -154,7 +216,6 @@ class MainPanel(lf.ui.Panel):
             theme.palette.text_dim,
         )
         layout.spacing()
-
         if self._orig_images_folder:
             layout.text_colored(self._orig_images_folder, theme.palette.text_dim)
             if layout.button_styled("Change Original Images Folder", "warning", (-1, 28 * scale)):
@@ -163,7 +224,6 @@ class MainPanel(lf.ui.Panel):
             layout.text_colored("Images: dataset folder (default)", theme.palette.text_dim)
             if layout.button_styled("Set Original Images Folder", "warning", (-1, 28 * scale)):
                 self._pick_orig_images_folder()
-
         layout.spacing()
         if layout.button_styled("Calc Georeference From EXIF", "primary", (-1, 32 * scale)):
             self._run_exif()
@@ -182,15 +242,12 @@ class MainPanel(lf.ui.Panel):
         t     = self._transform
         n_in  = t.get("n_inliers", t["n"])
         n_tot = t.get("n_total",   t["n"])
-
         layout.separator()
         layout.label("Computed Transform  (local -> ECEF)")
         layout.text_colored(f"Inliers : {n_in} / {n_tot}  ({n_tot - n_in} rejected)", theme.palette.text_dim)
         layout.text_colored(f"Scale   : {t['s']:.8f}", theme.palette.text_dim)
         layout.text_colored(f"RMSE    : {t['rmse']:.4f} m", theme.palette.text_dim)
-
         layout.separator()
-
         if self._picking:
             if layout.button_styled("Stop Picking##geo_pick_stop", "error", (-1, 32 * scale)):
                 self._cancel_pick()
@@ -198,7 +255,6 @@ class MainPanel(lf.ui.Panel):
         else:
             if layout.button_styled("Get Pixel Location##geo_pick_start", "primary", (-1, 32 * scale)):
                 self._start_pick()
-
         if self._lla is not None:
             self._draw_lla_section(layout, scale, theme)
 
@@ -215,8 +271,6 @@ class MainPanel(lf.ui.Panel):
         layout.spacing()
         if layout.button_styled("Clear Point", "error", (-1, 0)):
             self._clear_point()
-
-    # ── Picking ───────────────────────────────────────────────────────────────
 
     def _start_pick(self):
         from ..operators.geo_picker import set_pick_callback
@@ -235,21 +289,16 @@ class MainPanel(lf.ui.Panel):
         lf.ui.request_redraw()
 
     def _on_location_picked(self, world_pos: tuple):
-        """Called by the operator when the user clicks on the model."""
         from ..geo.transform import to_4x4_col_major
         from ..geo.ecef import ecef_to_geodetic
         import numpy as np
-
         global _active_world_pos
-
         self._world_pos = world_pos
         _active_world_pos = world_pos
-
         t = self._transform
         G = np.array(to_4x4_col_major(t["s"], t["R"], t["t"])).reshape(4, 4, order="F")
         p = np.array([world_pos[0], world_pos[1], world_pos[2], 1.0])
         ecef = G @ p
-
         lat, lon, alt = ecef_to_geodetic(float(ecef[0]), float(ecef[1]), float(ecef[2]))
         self._lla = (lat, lon, alt)
         lf.log.info(f"geo_register: picked lat={lat:.8f} lon={lon:.8f} alt={alt:.3f} m")
@@ -268,30 +317,23 @@ class MainPanel(lf.ui.Panel):
         lat, lon, alt = self._lla
         text = f"{lat:.8f}, {lon:.8f}, {alt:.3f}"
         lf.ui.set_clipboard_text(text)
-        lf.log.info(f"geo_register: copied to clipboard: {text}")
 
     def _pick_orig_images_folder(self):
         folder = lf.ui.open_folder_dialog(title="Select Original Images Folder")
         if folder:
             self._orig_images_folder = folder
-            lf.log.info(f"geo_register: original images folder set to '{folder}'")
             lf.ui.request_redraw()
-
-    # ── Georeference pipeline ─────────────────────────────────────────────────
 
     def _run_exif(self):
         from lfs_plugins.ui.state import AppState
         from ..geo.exif_reader import find_images_with_gps, NoGPSDataError
-
         self._transform = None
         self._lla = None
         self._clear_point()
-
         scene_path = AppState.scene_path.value
         if not scene_path or lf.get_scene() is None:
             self._set_status("No scene is currently loaded.", error=True)
             return
-
         if self._orig_images_folder:
             scan_folder = self._orig_images_folder
         else:
@@ -302,19 +344,14 @@ class MainPanel(lf.ui.Panel):
                 scan_folder = str(Path(data_path) / images_sub) if images_sub else data_path
             else:
                 scan_folder = scene_path
-        lf.log.info(f"geo_register: scanning '{scan_folder}' for GPS EXIF ...")
         try:
             raw = find_images_with_gps(scan_folder)
         except NoGPSDataError as exc:
             self._set_status(str(exc), error=True)
-            lf.log.warn(f"geo_register: {exc}")
             return
         except Exception as exc:
             self._set_status(f"EXIF scan error: {exc}", error=True)
-            lf.log.error(f"geo_register: {exc}")
             return
-
-        lf.log.info(f"geo_register: GPS found in {len(raw)} image(s).")
         gps_list = [
             {"name": Path(e["path"]).stem, "lat": e["lat"], "lon": e["lon"], "alt": e["alt"]}
             for e in raw
@@ -322,19 +359,10 @@ class MainPanel(lf.ui.Panel):
         self._run_georeg(gps_list)
 
     def _run_georeg(self, gps_list: list) -> None:
-        """Solve similarity transform using LFS scene camera positions as src_pts.
-
-        Used by EXIF, CSV, RealityScan, and Metashape XML modes.
-        src_pts = LFS world-space camera positions (same space as PLY positions).
-        dst_pts = GPS coordinates from the input source.
-
-        This ensures the resulting similarity transform is compatible with PLY
-        model-local space, which matches LFS world-space (scale ~1.0).
-        """
+        """Solve similarity transform using LFS scene camera positions as src_pts."""
         from lfs_plugins.ui.state import AppState
         from ..geo.camera_reader import read_camera_positions_from_scene
         from ..geo.ecef import geodetic_to_ecef
-        from ..geo.transform import robust_umeyama
 
         scene_path = AppState.scene_path.value
         scene = lf.get_scene()
@@ -345,7 +373,6 @@ class MainPanel(lf.ui.Panel):
         cameras = read_camera_positions_from_scene(scene)
         if not cameras:
             self._set_status("No camera nodes found in the scene. Load a dataset first.", error=True)
-            lf.log.warn("geo_register: no camera nodes in scene.")
             return
         lf.log.info(f"geo_register: {len(cameras)} camera pose(s) read from scene.")
 
@@ -366,19 +393,16 @@ class MainPanel(lf.ui.Panel):
                 "Need at least 3."
             )
             self._set_status(msg, error=True)
-            lf.log.warn(f"geo_register: {msg}")
             return
 
         self._run_solver(src_pts, dst_pts, matched_gps)
 
     def _run_solver(self, src_pts: list, dst_pts: list, matched_gps: list) -> None:
-        """Run RANSAC+IRLS solver and store the result. Shared by all georeg paths."""
         from lfs_plugins.ui.state import AppState
         from ..geo.transform import robust_umeyama
         import json
 
         scene_path = AppState.scene_path.value
-
         lf.log.info(f"geo_register: {len(src_pts)} correspondences - running RANSAC+IRLS ...")
         try:
             _cfg_path = Path(__file__).parent.parent / "config.json"
@@ -393,7 +417,6 @@ class MainPanel(lf.ui.Panel):
             )
         except Exception as exc:
             self._set_status(f"Transform estimation failed: {exc}", error=True)
-            lf.log.error(f"geo_register: {exc}")
             return
 
         self._transform = result
@@ -403,15 +426,8 @@ class MainPanel(lf.ui.Panel):
         status = f"Ready -- {n_in}/{n_tot} inliers, RMSE {result['rmse']:.3f} m"
         if saved_json:
             status += f" | Saved: {saved_json}"
-        if saved_csv:
-            status += f" | CSV: {saved_csv}"
         self._set_status(status, error=False)
-        lf.log.info(
-            f"geo_register: inliers={n_in}/{n_tot}  "
-            f"scale={result['s']:.6f}  RMSE={result['rmse']:.3f} m"
-        )
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
+        lf.log.info(f"geo_register: inliers={n_in}/{n_tot}  scale={result['s']:.6f}  RMSE={result['rmse']:.3f} m")
 
     def _draw_csv_section(self, layout, scale, theme):
         layout.text_colored(
@@ -424,32 +440,26 @@ class MainPanel(lf.ui.Panel):
             self._load_csv_file()
 
     def _load_csv_file(self) -> None:
-        import csv
-
+        import csv, io
         path = lf.ui.open_csv_file_dialog()
         if not path:
             return
-
         self._transform = None
         self._lla = None
         self._clear_point()
-
         try:
             gps_list = []
             with open(path, "r", encoding="utf-8", newline="") as f:
                 lines = f.read().splitlines()
             if lines and lines[0].startswith("#"):
                 lines[0] = lines[0].lstrip("#").strip()
-            import io
             reader = csv.DictReader(io.StringIO("\n".join(lines)))
             fieldnames = reader.fieldnames
             required = {"image_name", "lat", "lon", "alt"}
             if set(fieldnames) != required:
-                raise ValueError(f"Invalid CSV header. Expected columns: {required}, got {set(fieldnames)}")
-            lat_idx   = fieldnames.index("lat")
-            lon_idx   = fieldnames.index("lon")
-            alt_idx   = fieldnames.index("alt")
-            image_idx = fieldnames.index("image_name")
+                raise ValueError(f"Invalid CSV header. Expected: {required}")
+            lat_idx=fieldnames.index("lat"); lon_idx=fieldnames.index("lon")
+            alt_idx=fieldnames.index("alt"); image_idx=fieldnames.index("image_name")
             for row in reader:
                 values = list(row.values())
                 gps_list.append({
@@ -460,10 +470,7 @@ class MainPanel(lf.ui.Panel):
                 })
         except Exception as exc:
             self._set_status(f"Failed to parse CSV: {exc}", error=True)
-            lf.log.error(f"geo_register: {exc}")
             return
-
-        lf.log.info(f"geo_register: loaded {len(gps_list)} image positions from '{path}'")
         self._run_georeg(gps_list)
 
     def _draw_rs_csv_section(self, layout, scale, theme):
@@ -478,17 +485,13 @@ class MainPanel(lf.ui.Panel):
             self._load_rs_csv_file()
 
     def _load_rs_csv_file(self) -> None:
-        import csv
-        import io
-
+        import csv, io
         path = lf.ui.open_csv_file_dialog()
         if not path:
             return
-
         self._transform = None
         self._lla = None
         self._clear_point()
-
         try:
             gps_list = []
             with open(path, "r", encoding="utf-8", newline="") as f:
@@ -505,10 +508,7 @@ class MainPanel(lf.ui.Panel):
                 })
         except Exception as exc:
             self._set_status(f"Failed to parse RealityScan CSV: {exc}", error=True)
-            lf.log.error(f"geo_register: {exc}")
             return
-
-        lf.log.info(f"geo_register: loaded {len(gps_list)} RealityScan positions from '{path}'")
         self._run_georeg(gps_list)
 
     def _draw_metashape_xml_section(self, layout, scale, theme):
@@ -524,71 +524,42 @@ class MainPanel(lf.ui.Panel):
             self._load_metashape_xml_file()
 
     def _load_metashape_xml_file(self) -> None:
-        """Load Metashape XML and solve similarity transform.
-
-        Uses LFS world-space camera positions as src_pts (via _run_georeg),
-        which are in the same coordinate space as PLY model-local positions.
-        This ensures scale ~1.0 and correct render in Cesium.
-
-        GPS coordinates are read from the XML <reference> tags (GPS PPK),
-        giving accurate geodetic positioning (RMSE < 0.1m).
-        """
         from ..geo.metashape_parser import parse_metashape_xml, MetashapeXMLError
-
         path = lf.ui.open_xml_file_dialog()
         if not path:
             return
-
         self._transform = None
         self._lla = None
         self._clear_point()
-
         try:
-            # No include_scene_pos — we use LFS camera API for src_pts,
-            # not Metashape scene-space positions, to stay compatible with PLY space.
             gps_list = parse_metashape_xml(path)
         except MetashapeXMLError as exc:
             self._set_status(str(exc), error=True)
-            lf.log.error(f"geo_register: {exc}")
             return
         except Exception as exc:
             self._set_status(f"Failed to parse Metashape XML: {exc}", error=True)
-            lf.log.error(f"geo_register: {exc}")
             return
-
         if not gps_list:
-            self._set_status(
-                "No cameras with GPS reference found in Metashape XML.", error=True
-            )
-            lf.log.warn("geo_register: Metashape XML contained no cameras with <reference> data.")
+            self._set_status("No cameras with GPS reference found in Metashape XML.", error=True)
             return
-
         lf.log.info(f"geo_register: loaded {len(gps_list)} camera positions from Metashape XML '{path}'")
-        # Use LFS camera API positions as src_pts — same space as PLY positions.
         self._run_georeg(gps_list)
 
     def _load_similarity_file(self) -> None:
-        import json
-        import shutil
-
+        import json, shutil
         path = lf.ui.open_json_file_dialog()
         if not path:
             return
-
         self._transform = None
         self._lla = None
         self._clear_point()
-
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             for key in ("scale", "rotation", "translation"):
                 if key not in data:
                     self._set_status(f"Invalid similarity file: missing '{key}'", error=True)
-                    lf.log.error(f"geo_register: similarity file missing key '{key}'")
                     return
-
             n = data.get("n_total", data.get("n_inliers", 0))
             self._transform = {
                 "s":        data["scale"],
@@ -599,7 +570,6 @@ class MainPanel(lf.ui.Panel):
                 "n_inliers": data.get("n_inliers", n),
                 "n_total":   data.get("n_total",   n),
             }
-
             copied_to = None
             output_path = lf.dataset_params().output_path
             if output_path:
@@ -610,27 +580,19 @@ class MainPanel(lf.ui.Panel):
                     dst = expected_dir / src.name
                     shutil.copy2(str(src), str(dst))
                     copied_to = dst
-                    lf.log.info(f"geo_register: copied similarity file to '{dst}'")
-
             status = f"Loaded: {Path(path).name}"
             if copied_to:
                 status += f" | Copied to: {copied_to}"
             self._set_status(status, error=False)
-            lf.log.info(f"geo_register: loaded similarity transform from '{path}'")
-
         except Exception as exc:
             self._set_status(f"Failed to load file: {exc}", error=True)
-            lf.log.error(f"geo_register: {exc}")
 
     def _save_transform(self, result: dict, scene_path: str, matched_gps: list | None = None) -> tuple:
-        import json
-        import csv
-
+        import json, csv
         output_path = lf.dataset_params().output_path
         base = Path(output_path) if output_path else Path(scene_path)
         out_dir = base / "geo_register_plugin_data"
         out_dir.mkdir(parents=True, exist_ok=True)
-
         payload = {
             "scale": result["s"],
             "rotation": result["R"],
@@ -639,11 +601,9 @@ class MainPanel(lf.ui.Panel):
             "n_inliers": result.get("n_inliers", result["n"]),
             "n_total": result.get("n_total", result["n"]),
         }
-
         out_file = out_dir / "similarity_transform.json"
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-
         saved_csv = None
         if matched_gps:
             csv_file = out_dir / "image_positions.csv"
@@ -653,24 +613,6 @@ class MainPanel(lf.ui.Panel):
                 for row in matched_gps:
                     writer.writerow([row["name"], row["lat"], row["lon"], row["alt"]])
             saved_csv = str(csv_file)
-            lf.log.info(f"geo_register: image positions saved to '{csv_file}'")
-
-        info_file = out_dir / "similarity_transform_info.txt"
-        with open(info_file, "w", encoding="utf-8") as f:
-            f.write("Similarity Transform\n")
-            f.write("====================\n\n")
-            f.write("Formula: world_ecef = scale * R @ p_scene + translation\n\n")
-            f.write("Fields:\n")
-            f.write("  scale       - uniform scale factor\n")
-            f.write("  rotation    - 3x3 rotation matrix (row-major)\n")
-            f.write("  translation - 3D translation vector in metres\n")
-            f.write("  rmse_m      - root mean square error of the fit in metres\n\n")
-            f.write("Order of operations:\n")
-            f.write("  1. Multiply scene point by scale\n")
-            f.write("  2. Apply rotation R\n")
-            f.write("  3. Add translation\n\n")
-            f.write("The result is an ECEF (Earth-Centered Earth-Fixed) coordinate in metres.\n")
-
         lf.log.info(f"geo_register: transform saved to '{out_file}'")
         return str(out_file), saved_csv
 
@@ -678,7 +620,6 @@ class MainPanel(lf.ui.Panel):
         layout.separator()
         layout.label("Export")
         layout.separator()
-
         splat_names = self._get_splat_names()
         layout.label("Splat Model:")
         layout.same_line()
@@ -690,7 +631,6 @@ class MainPanel(lf.ui.Panel):
                 self._export_splat_idx = new_idx
         else:
             layout.text_colored("No splat models found in scene.", theme.palette.text_dim)
-
         layout.label("Format:")
         layout.same_line()
         fmt_changed, fmt_idx = layout.combo(
@@ -698,9 +638,7 @@ class MainPanel(lf.ui.Panel):
         )
         if fmt_changed:
             self._export_format_idx = fmt_idx
-
         layout.spacing()
-
         if self._export_format_idx in (0, 1):
             self._draw_las_export(layout, scale, theme, splat_names)
         else:
@@ -710,11 +648,9 @@ class MainPanel(lf.ui.Panel):
         if self._export_output_path:
             layout.text_colored(self._export_output_path, theme.palette.text_dim)
             layout.spacing()
-
         if self._export_progress is not None:
             pct = int(self._export_progress * 100)
-            layout.progress_bar(self._export_progress, overlay=f"Exporting... {pct}%",
-                                width=-1, height=24 * scale)
+            layout.progress_bar(self._export_progress, overlay=f"Exporting... {pct}%", width=-1, height=24 * scale)
         else:
             if self._export_error:
                 layout.text_colored(f"[!] {self._export_error}", (1.0, 0.4, 0.4, 1.0))
@@ -725,20 +661,15 @@ class MainPanel(lf.ui.Panel):
                     splat_name = splat_names[self._export_splat_idx]
                     if self._export_format_idx == 1:
                         save_fn = getattr(lf.ui, "save_laz_file_dialog", None)
-                        if save_fn:
-                            path = save_fn(default_name=splat_name)
-                        else:
-                            path = lf.ui.save_las_file_dialog(default_name=splat_name)
-                            if path:
-                                path = str(Path(path).with_suffix(".laz"))
+                        path = save_fn(default_name=splat_name) if save_fn else lf.ui.save_las_file_dialog(default_name=splat_name)
+                        if path and not save_fn:
+                            path = str(Path(path).with_suffix(".laz"))
                     else:
                         path = lf.ui.save_las_file_dialog(default_name=splat_name)
                     if path:
                         self._export_output_path = path
                         self._start_export_las(path)
                         lf.ui.request_redraw()
-            else:
-                layout.text_colored("No splat models found in scene.", theme.palette.text_dim)
 
     def _draw_tiles_export(self, layout, scale, theme, splat_names) -> None:
         if self._tiles_out_dir:
@@ -749,9 +680,7 @@ class MainPanel(lf.ui.Panel):
             layout.text_colored("No output directory selected.", theme.palette.text_dim)
             if layout.button_styled("Choose Output Directory##tiles_pick_dir", "primary", (-1, 32 * scale)):
                 self._pick_tiles_out_dir()
-
         layout.spacing()
-
         if self._tiles_sh_info is not None:
             detected, user_bound, output = self._tiles_sh_info
             dim = theme.palette.text_dim
@@ -759,11 +688,9 @@ class MainPanel(lf.ui.Panel):
             layout.text_colored(f"User Bound Degree:   {user_bound}", dim)
             layout.text_colored(f"Output SH Degree:    {output}", dim)
             layout.spacing()
-
         if self._tiles_progress is not None:
             pct = int(self._tiles_progress * 100)
-            layout.progress_bar(self._tiles_progress, overlay=f"Exporting... {pct}%",
-                                width=-1, height=24 * scale)
+            layout.progress_bar(self._tiles_progress, overlay=f"Exporting... {pct}%", width=-1, height=24 * scale)
         else:
             if self._tiles_error:
                 layout.text_colored(f"[!] {self._tiles_error}", (1.0, 0.4, 0.4, 1.0))
@@ -772,9 +699,7 @@ class MainPanel(lf.ui.Panel):
             if splat_names and self._tiles_out_dir:
                 layout.label("Max SH:")
                 layout.same_line()
-                sh_changed, sh_idx = layout.combo(
-                    "##tiles_max_sh", 3 - self._tiles_max_sh, ["3", "2", "1", "0"]
-                )
+                sh_changed, sh_idx = layout.combo("##tiles_max_sh", 3 - self._tiles_max_sh, ["3", "2", "1", "0"])
                 if sh_changed:
                     self._tiles_max_sh = 3 - sh_idx
                 layout.spacing()
@@ -786,109 +711,80 @@ class MainPanel(lf.ui.Panel):
 
     def _get_splat_names(self) -> list[str]:
         import lichtfeld.scene as lf_scene
-
         scene = lf.get_scene()
         if scene is None:
             return []
-        return [
-            node.name if node.name else f"Splat #{node.id}"
-            for node in scene.get_nodes(type=lf_scene.NodeType.SPLAT)
-        ]
+        return [node.name if node.name else f"Splat #{node.id}" for node in scene.get_nodes(type=lf_scene.NodeType.SPLAT)]
 
     def _start_export_las(self, output_path: str) -> None:
-        import threading
-        import lichtfeld.scene as lf_scene
-
+        import threading, lichtfeld.scene as lf_scene
         scene = lf.get_scene()
         if scene is None:
             self._export_error = "No scene loaded."
             return
-
         nodes = scene.get_nodes(type=lf_scene.NodeType.SPLAT)
         if self._export_splat_idx >= len(nodes):
             self._export_error = "Selected splat model not found."
             return
-
         node = nodes[self._export_splat_idx]
         self._export_progress = 0.0
-        self._export_error    = None
-        self._export_success  = None
+        self._export_error = None
+        self._export_success = None
         lf.ui.request_redraw()
+        threading.Thread(target=self._export_las_worker, args=(node, dict(self._transform), output_path), daemon=True).start()
 
-        threading.Thread(
-            target=self._export_las_worker,
-            args=(node, dict(self._transform), output_path),
-            daemon=True,
-        ).start()
-
-    def _export_las_worker(self, node, transform: dict, output_path: str) -> None:
+    def _export_las_worker(self, node, transform, output_path):
         try:
             from ..geo.las_exporter import export_las
             export_las(node, transform, output_path, progress_cb=self._on_export_progress)
-            lf.log.info(f"geo_register: LAS exported to '{output_path}'")
             self._export_success = f"Export succeeded: {Path(output_path).name}"
         except Exception as exc:
             self._export_error = str(exc)
-            lf.log.error(f"geo_register: LAS export failed: {exc}")
         finally:
             self._export_progress = None
             lf.ui.request_redraw()
 
-    def _on_export_progress(self, fraction: float) -> None:
+    def _on_export_progress(self, fraction):
         self._export_progress = fraction
         lf.ui.request_redraw()
 
-    def _pick_tiles_out_dir(self) -> None:
+    def _pick_tiles_out_dir(self):
         folder = lf.ui.open_folder_dialog(title="Select 3D Tiles Output Directory")
         if folder:
             self._tiles_out_dir = folder
-            self._tiles_error   = None
+            self._tiles_error = None
             self._tiles_success = None
             lf.ui.request_redraw()
 
-    def _start_export_tiles(self) -> None:
-        import threading
-        import lichtfeld.scene as lf_scene
-
+    def _start_export_tiles(self):
+        import threading, lichtfeld.scene as lf_scene
         out_dir = Path(self._tiles_out_dir)
-
         for fname in ("tileset.json", "splats.glb"):
             if (out_dir / fname).exists():
-                self._tiles_error = (
-                    f"{fname} already exists in the selected directory. "
-                    "Please choose a different directory."
-                )
+                self._tiles_error = f"{fname} already exists. Choose a different directory."
                 lf.ui.request_redraw()
                 return
-
         scene = lf.get_scene()
         if scene is None:
             self._tiles_error = "No scene loaded."
             return
-
         nodes = scene.get_nodes(type=lf_scene.NodeType.SPLAT)
         if self._export_splat_idx >= len(nodes):
             self._tiles_error = "Selected splat model not found."
             return
-
         node = nodes[self._export_splat_idx]
         self._tiles_progress = 0.0
-        self._tiles_error    = None
-        self._tiles_success  = None
-        self._tiles_sh_info  = None
+        self._tiles_error = None
+        self._tiles_success = None
+        self._tiles_sh_info = None
         lf.ui.request_redraw()
+        threading.Thread(target=self._export_tiles_worker, args=(node, dict(self._transform), str(out_dir), self._tiles_max_sh), daemon=True).start()
 
-        threading.Thread(
-            target=self._export_tiles_worker,
-            args=(node, dict(self._transform), str(out_dir), self._tiles_max_sh),
-            daemon=True,
-        ).start()
-
-    def _on_tiles_progress(self, fraction: float) -> None:
+    def _on_tiles_progress(self, fraction):
         self._tiles_progress = fraction
         lf.ui.request_redraw()
 
-    def _export_tiles_worker(self, node, transform: dict, out_dir: str, max_sh: int = 3) -> None:
+    def _export_tiles_worker(self, node, transform, out_dir, max_sh=3):
         try:
             from ..geo.tiles_exporter import export_3dtiles, DIM_FOR_DEGREE
             try:
@@ -901,11 +797,7 @@ class MainPanel(lf.ui.Panel):
             effective_sh = min(max_sh, actual_sh)
             self._tiles_sh_info = (actual_sh, max_sh, effective_sh)
             lf.ui.request_redraw()
-            export_3dtiles(
-                node, transform, out_dir,
-                sh_degree=effective_sh,
-                progress_cb=self._on_tiles_progress,
-            )
+            export_3dtiles(node, transform, out_dir, sh_degree=effective_sh, progress_cb=self._on_tiles_progress)
             lf.log.info(f"geo_register: 3D Tiles exported to '{out_dir}'")
             self._tiles_success = f"Export succeeded: {Path(out_dir).name}/"
         except Exception as exc:
@@ -914,8 +806,6 @@ class MainPanel(lf.ui.Panel):
         finally:
             self._tiles_progress = None
             lf.ui.request_redraw()
-
-    # ── PLY Converter (Edit Mode) ─────────────────────────────────────────────
 
     def _draw_ply_converter_section(self, layout, scale, theme) -> None:
         layout.label("PLY → Geo Export")
@@ -930,7 +820,6 @@ class MainPanel(lf.ui.Panel):
         layout.spacing()
         layout.separator()
         layout.spacing()
-
         layout.label("PLY File:")
         if self._ply_file_path:
             layout.text_colored(Path(self._ply_file_path).name, theme.palette.text_dim)
@@ -940,9 +829,7 @@ class MainPanel(lf.ui.Panel):
             layout.text_colored("No file selected.", theme.palette.text_dim)
             if layout.button_styled("Pick PLY File##ply_pick", "primary", (-1, 32 * scale)):
                 self._pick_ply_file()
-
         layout.spacing()
-
         layout.label("Similarity Transform JSON:")
         if self._ply_sim_path:
             layout.text_colored(Path(self._ply_sim_path).name, theme.palette.text_dim)
@@ -952,35 +839,24 @@ class MainPanel(lf.ui.Panel):
             layout.text_colored("No file selected.", theme.palette.text_dim)
             if layout.button_styled("Pick Similarity JSON##ply_sim_pick", "primary", (-1, 32 * scale)):
                 self._pick_ply_sim_file()
-
         inputs_ready = self._ply_file_path is not None and self._ply_sim_path is not None
-
         if not inputs_ready:
             return
-
         layout.spacing()
         layout.separator()
-
         layout.label("Format:")
         layout.same_line()
-        fmt_changed, fmt_idx = layout.combo(
-            "##ply_format", self._ply_format_idx, ["LAS", "LAZ", "3D Tiles (SPZ)"]
-        )
+        fmt_changed, fmt_idx = layout.combo("##ply_format", self._ply_format_idx, ["LAS", "LAZ", "3D Tiles (SPZ)"])
         if fmt_changed:
             self._ply_format_idx = fmt_idx
-
         if self._ply_format_idx == 2:
             layout.spacing()
             layout.label("Max SH:")
             layout.same_line()
-            sh_changed, sh_idx = layout.combo(
-                "##ply_max_sh", 3 - self._ply_max_sh, ["3", "2", "1", "0"]
-            )
+            sh_changed, sh_idx = layout.combo("##ply_max_sh", 3 - self._ply_max_sh, ["3", "2", "1", "0"])
             if sh_changed:
                 self._ply_max_sh = 3 - sh_idx
-
         layout.spacing()
-
         if self._ply_format_idx in (0, 1):
             if self._ply_out_file:
                 layout.text_colored(self._ply_out_file, theme.palette.text_dim)
@@ -995,9 +871,7 @@ class MainPanel(lf.ui.Panel):
                 if layout.button_styled("Choose Output Directory##ply_dir_pick", "primary", (-1, 32 * scale)):
                     self._pick_ply_out_dir()
             layout.spacing()
-
         ready = self._ply_format_idx in (0, 1) or self._ply_out_dir is not None
-
         if self._ply_format_idx == 2 and self._ply_sh_info is not None:
             detected, user_bound, output = self._ply_sh_info
             dim = theme.palette.text_dim
@@ -1005,23 +879,20 @@ class MainPanel(lf.ui.Panel):
             layout.text_colored(f"User Bound Degree:   {user_bound}", dim)
             layout.text_colored(f"Output SH Degree:    {output}", dim)
             layout.spacing()
-
         if self._ply_progress is not None:
             pct = int(self._ply_progress * 100)
-            layout.progress_bar(self._ply_progress, overlay=f"Exporting... {pct}%",
-                                width=-1, height=24 * scale)
+            layout.progress_bar(self._ply_progress, overlay=f"Exporting... {pct}%", width=-1, height=24 * scale)
         elif ready:
             if self._ply_error:
                 layout.text_colored(f"[!] {self._ply_error}", (1.0, 0.4, 0.4, 1.0))
             if self._ply_success:
                 layout.text_colored(self._ply_success, (0.3, 1.0, 0.3, 1.0))
-            btn_label = ["Export LAS##ply_exp", "Export LAZ##ply_exp",
-                         "Export 3D Tiles##ply_exp"][self._ply_format_idx]
+            btn_label = ["Export LAS##ply_exp", "Export LAZ##ply_exp", "Export 3D Tiles##ply_exp"][self._ply_format_idx]
             if layout.button_styled(btn_label, "primary", (-1, 32 * scale)):
                 self._start_ply_export()
                 lf.ui.request_redraw()
 
-    def _pick_ply_file(self) -> None:
+    def _pick_ply_file(self):
         start_dir = str(Path(self._ply_file_path).parent) if self._ply_file_path else ""
         path = lf.ui.open_ply_file_dialog(start_dir)
         if path:
@@ -1030,7 +901,7 @@ class MainPanel(lf.ui.Panel):
             self._ply_success = None
             lf.ui.request_redraw()
 
-    def _pick_ply_sim_file(self) -> None:
+    def _pick_ply_sim_file(self):
         path = lf.ui.open_json_file_dialog()
         if path:
             self._ply_sim_path = path
@@ -1038,7 +909,7 @@ class MainPanel(lf.ui.Panel):
             self._ply_success = None
             lf.ui.request_redraw()
 
-    def _pick_ply_out_dir(self) -> None:
+    def _pick_ply_out_dir(self):
         folder = lf.ui.open_folder_dialog(title="Select Output Directory")
         if folder:
             self._ply_out_dir = folder
@@ -1046,10 +917,8 @@ class MainPanel(lf.ui.Panel):
             self._ply_success = None
             lf.ui.request_redraw()
 
-    def _start_ply_export(self) -> None:
-        import json
-        import threading
-
+    def _start_ply_export(self):
+        import json, threading
         try:
             with open(self._ply_sim_path, "r", encoding="utf-8") as f:
                 sim_data = json.load(f)
@@ -1066,17 +935,13 @@ class MainPanel(lf.ui.Panel):
             self._ply_error = f"Failed to read similarity JSON: {exc}"
             lf.ui.request_redraw()
             return
-
         if self._ply_format_idx in (0, 1):
             splat_name = Path(self._ply_file_path).stem
             if self._ply_format_idx == 1:
                 save_fn = getattr(lf.ui, "save_laz_file_dialog", None)
-                if save_fn:
-                    out_path = save_fn(default_name=splat_name)
-                else:
-                    out_path = lf.ui.save_las_file_dialog(default_name=splat_name)
-                    if out_path:
-                        out_path = str(Path(out_path).with_suffix(".laz"))
+                out_path = save_fn(default_name=splat_name) if save_fn else lf.ui.save_las_file_dialog(default_name=splat_name)
+                if out_path and not save_fn:
+                    out_path = str(Path(out_path).with_suffix(".laz"))
             else:
                 out_path = lf.ui.save_las_file_dialog(default_name=splat_name)
             if not out_path:
@@ -1086,35 +951,23 @@ class MainPanel(lf.ui.Panel):
             out_dir = Path(self._ply_out_dir)
             for fname in ("tileset.json", "splats.glb"):
                 if (out_dir / fname).exists():
-                    self._ply_error = (
-                        f"{fname} already exists. Please choose a different directory."
-                    )
+                    self._ply_error = f"{fname} already exists. Choose a different directory."
                     lf.ui.request_redraw()
                     return
             out_path = str(out_dir)
-
         self._ply_progress = 0.0
-        self._ply_error    = None
-        self._ply_success  = None
-        self._ply_sh_info  = None
+        self._ply_error = None
+        self._ply_success = None
+        self._ply_sh_info = None
         lf.ui.request_redraw()
+        threading.Thread(target=self._ply_export_worker, args=(self._ply_file_path, transform, out_path, self._ply_format_idx, self._ply_max_sh), daemon=True).start()
 
-        threading.Thread(
-            target=self._ply_export_worker,
-            args=(self._ply_file_path, transform, out_path, self._ply_format_idx,
-                  self._ply_max_sh),
-            daemon=True,
-        ).start()
-
-    def _ply_export_worker(self, ply_path: str, transform: dict,
-                           out_path: str, fmt_idx: int, max_sh: int = 3) -> None:
+    def _ply_export_worker(self, ply_path, transform, out_path, fmt_idx, max_sh=3):
         try:
             if fmt_idx in (0, 1):
                 from ..geo.las_exporter import export_las_from_ply
-                export_las_from_ply(ply_path, transform, out_path,
-                                    progress_cb=self._on_ply_progress)
+                export_las_from_ply(ply_path, transform, out_path, progress_cb=self._on_ply_progress)
                 self._ply_success = f"Exported: {Path(out_path).name}"
-                lf.log.info(f"geo_register: PLY→LAS exported to '{out_path}'")
             else:
                 from ..geo.tiles_exporter import _read_ply, _build_from_ply, _export_from_arrays, DIM_FOR_DEGREE
                 from pathlib import Path as _P
@@ -1129,20 +982,12 @@ class MainPanel(lf.ui.Panel):
                     _build_from_ply(ply_data, names, sh_degree=effective_sh)
                 )
                 _export_from_arrays(
-                    positions_local=positions,
-                    rotations_wxyz=rotations_wxyz,
-                    scales_log=scales_log,
-                    opacity_logit=opacity_logit,
-                    f_dc=f_dc,
-                    f_rest_rgb=f_rest_rgb,
-                    sh_degree=eff_sh,
-                    transform=transform,
-                    out_dir=_P(out_path),
-                    content_name="splats.glb",
+                    positions_local=positions, rotations_wxyz=rotations_wxyz, scales_log=scales_log,
+                    opacity_logit=opacity_logit, f_dc=f_dc, f_rest_rgb=f_rest_rgb, sh_degree=eff_sh,
+                    transform=transform, out_dir=_P(out_path), content_name="splats.glb",
                     progress_cb=self._on_ply_progress,
                 )
                 self._ply_success = f"Exported: {_P(out_path).name}/"
-                lf.log.info(f"geo_register: PLY→3DTiles exported to '{out_path}'")
         except Exception as exc:
             self._ply_error = str(exc)
             lf.log.error(f"geo_register: PLY export failed: {exc}")
@@ -1150,34 +995,28 @@ class MainPanel(lf.ui.Panel):
             self._ply_progress = None
             lf.ui.request_redraw()
 
-    def _on_ply_progress(self, fraction: float) -> None:
+    def _on_ply_progress(self, fraction):
         self._ply_progress = fraction
         lf.ui.request_redraw()
 
-    def _detect_existing_registration(self) -> None:
+    def _detect_existing_registration(self):
         import json
         from lfs_plugins.ui.state import AppState
-
         scene_path = AppState.scene_path.value
         if not scene_path:
             return
-
         params = lf.dataset_params()
         output_path = params.output_path if params else None
         base = Path(output_path) if output_path else Path(scene_path)
         candidate = base / "geo_register_plugin_data" / "similarity_transform.json"
-
         if not candidate.exists():
             return
-
         try:
             with open(candidate, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             for key in ("scale", "rotation", "translation"):
                 if key not in data:
                     return
-
             n = data.get("n_total", data.get("n_inliers", 0))
             self._transform = {
                 "s":         data["scale"],
@@ -1188,10 +1027,7 @@ class MainPanel(lf.ui.Panel):
                 "n_inliers": data.get("n_inliers", n),
                 "n_total":   data.get("n_total",   n),
             }
-            msg = "Detected pre existing registration"
-            self._set_status(msg, error=False)
-            lf.log.info(f"geo_register: {msg} from '{candidate}'")
-
+            self._set_status("Detected pre existing registration", error=False)
         except Exception as exc:
             lf.log.warn(f"geo_register: failed to load existing transform: {exc}")
 
