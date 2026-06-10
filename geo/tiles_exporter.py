@@ -406,7 +406,7 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
     half   = (pmax - pmin) * 0.5
 
     scene_diagonal = float(np.linalg.norm(pmax - pmin))
-    geom_err_m     = float(scene_diagonal * s)
+    geom_err_m     = scene_diagonal  # scene-space units, consistent with children
 
     root_tile = _node_to_tile_dict(root_node, s)
     root_tile["transform"]      = M.T.flatten().tolist()
@@ -434,8 +434,7 @@ def _build_tileset_tiled(sim: dict, root_node: _OctreeNode,
                 ],
             }
         },
-        "geometricError": geom_err_m,
-        "root": root_tile,
+        "geometricError": geom_err_m,  # scene-space, consistent with all tiles
     }
 
 
